@@ -1,0 +1,30 @@
+[project]
+name = "gridhouse"
+version = "0.1.0"
+description = "Job hunting lakehouse"
+requires-python = ">=3.11"
+
+dependencies = [
+    # Extractors
+    "telethon>=1.34",
+    "selenium>=4.0",
+    "requests>=2.31",
+    # Iceberg
+    "pyiceberg[s3,nessie]>=0.7",
+    # AI scoring
+    "anthropic>=0.30",
+    # Orchestration
+    "apache-airflow>=2.9",
+    # Utils
+    "rich>=13.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

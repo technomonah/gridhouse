@@ -1,0 +1,24 @@
+# Env
+.env
+
+# Telethon
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+dist/
+*.egg-info/
+
+# LinkedIn Selenium
+linkedin-session/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/

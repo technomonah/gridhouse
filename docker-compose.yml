@@ -1,0 +1,88 @@
+services:
+  minio:
+    # S3-compatible object storage — holds all Iceberg data files (Parquet).
+    # Console UI available at http://localhost:9001
+    image: minio/minio:latest
+    container_name: gridhouse-minio
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lakehouse
+
+  minio-init:
+    # One-time init container — creates the warehouse bucket if it doesn't exist.
+    # Runs after MinIO is healthy, then exits. Nessie waits for this to complete.
+    image: minio/mc:latest
+    container_name: gridhouse-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
+        mc mb --ignore-existing local/warehouse;
+        echo 'Bucket warehouse ready.';
+        exit 0;
+      "
+    networks:
+      - lakehouse
+
+  nessie:
+    # Iceberg catalog — tracks table metadata, schema evolution, and enables time travel.
+    # Uses RocksDB for persistent metadata storage (survives container restarts).
+    # REST API available at http://localhost:19120/api/v1
+    # Iceberg REST endpoint: http://localhost:19120/iceberg/main
+    image: ghcr.io/projectnessie/nessie:latest
+    container_name: gridhouse-nessie
+    ports:
+      - "19120:19120"
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      # RocksDB: persistent embedded store, no external DB needed
+      NESSIE_VERSION_STORE_TYPE: ROCKSDB
+      NESSIE_VERSION_STORE_ROCKSDB_DATABASE_PATH: /data/rocks
+
+      # Default warehouse points to MinIO bucket
+      NESSIE_CATALOG_DEFAULT_WAREHOUSE: warehouse
+      NESSIE_CATALOG_WAREHOUSES_WAREHOUSE_LOCATION: s3://warehouse/
+
+      # MinIO connection — path-style required for non-AWS S3
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_ENDPOINT: http://minio:9000
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_PATH_STYLE_ACCESS: "true"
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_REGION: us-east-1
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_AUTH_TYPE: STATIC
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_ACCESS_KEY: ${MINIO_ROOT_USER}
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - nessie-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:19120/api/v2/config"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - lakehouse
+
+volumes:
+  # Persists MinIO object storage data (Parquet files) across container restarts
+  minio-data:
+  # Persists Nessie RocksDB metadata across container restarts
+  nessie-data:
+
+networks:
+  lakehouse:
+    driver: bridge
