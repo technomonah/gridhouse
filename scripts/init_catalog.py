@@ -59,6 +59,32 @@ BRONZE_LINKEDIN_POSTS_SCHEMA = Schema(
     NestedField(11, "passed_prefilter", BooleanType(),   required=True),
 )
 
+# Raw HH.ru vacancies as returned by the public /vacancies API.
+# employer_id is nullable — HH allows anonymous job postings.
+# salary_* fields are nullable — many vacancies don't disclose compensation.
+BRONZE_HH_VACANCIES_SCHEMA = Schema(
+    NestedField(1,  "vacancy_id",       StringType(),    required=True),
+    NestedField(2,  "vacancy_url",      StringType(),    required=True),
+    NestedField(3,  "vacancy_name",     StringType(),    required=True),
+    NestedField(4,  "employer_id",      StringType(),    required=False),
+    NestedField(5,  "employer_name",    StringType(),    required=True),
+    NestedField(6,  "salary_from",      LongType(),      required=False),
+    NestedField(7,  "salary_to",        LongType(),      required=False),
+    NestedField(8,  "salary_currency",  StringType(),    required=False),
+    NestedField(9,  "salary_gross",     BooleanType(),   required=False),
+    NestedField(10, "area_id",          StringType(),    required=True),
+    NestedField(11, "area_name",        StringType(),    required=True),
+    NestedField(12, "experience",       StringType(),    required=True),
+    NestedField(13, "employment",       StringType(),    required=True),
+    NestedField(14, "schedule",         StringType(),    required=True),
+    NestedField(15, "snippet_req",      StringType(),    required=False),
+    NestedField(16, "snippet_resp",     StringType(),    required=False),
+    NestedField(17, "published_at",     TimestampType(), required=True),
+    NestedField(18, "extracted_at",     TimestampType(), required=True),
+    NestedField(19, "search_query",     StringType(),    required=True),
+    NestedField(20, "passed_prefilter", BooleanType(),   required=True),
+)
+
 # Registry of all data sources. Extractors read active sources from here
 # instead of having channel lists hardcoded in scripts.
 SOURCES_SCHEMA = Schema(
@@ -87,6 +113,24 @@ _TG_CHANNELS = [
 _LINKEDIN_QUERIES = [
     '"Analytics Engineer" hiring',
     'dbt "data engineer" hiring',
+]
+
+# Initial HH.ru searches — two geography variants per query:
+#   - Almaty (area=160): office/hybrid/remote within Kazakhstan
+#   - Global (no area): remote-only positions worldwide
+#
+# Russian queries use professional_role=156 (BI-аналитик, аналитик данных)
+# instead of free text — "аналитик данных" / "инженер данных" without a role
+# filter pulls in lawyers, marketers, and HR (>500 irrelevant results).
+# English queries ("Analytics Engineer", "Data Engineer") are precise enough
+# on their own and don't need an additional role filter.
+_HH_SEARCHES = [
+    {"query": "Analytics Engineer",                     "area": "160"},
+    {"query": "Data Engineer",                          "area": "160"},
+    {"query": "аналитик данных", "professional_role": "156", "area": "160"},
+    {"query": "Analytics Engineer",                     "schedule": "remote"},
+    {"query": "Data Engineer",                          "schedule": "remote"},
+    {"query": "аналитик данных", "professional_role": "156", "schedule": "remote"},
 ]
 
 
@@ -118,6 +162,7 @@ def init_tables(catalog) -> None:
     tables = [
         ("bronze.tg_messages",      BRONZE_TG_MESSAGES_SCHEMA),
         ("bronze.linkedin_posts",   BRONZE_LINKEDIN_POSTS_SCHEMA),
+        ("bronze.hh_vacancies",     BRONZE_HH_VACANCIES_SCHEMA),
         ("meta.sources",            SOURCES_SCHEMA),
     ]
     for identifier, schema in tables:
@@ -177,6 +222,24 @@ def seed_sources(catalog) -> None:
             "added_at":    now,
         })
 
+    # Seed HH searches
+    for search in _HH_SEARCHES:
+        slug = search["query"].lower().replace(" ", "_")[:30]
+        geo = "almaty" if search.get("area") else "remote"
+        role_suffix = f"_r{search['professional_role']}" if search.get("professional_role") else ""
+        source_id = f"hh_{slug}_{geo}{role_suffix}"
+        if source_id in existing:
+            print(f"  source exists:  {source_id}")
+            continue
+        rows.append({
+            "source_id":   source_id,
+            "source_type": "hh",
+            "name":        f"{search['query']} ({geo})",
+            "config":      json.dumps(search),
+            "active":      True,
+            "added_at":    now,
+        })
+
     if rows:
         arrow_schema = pa.schema([
             pa.field("source_id",   pa.string(),        nullable=False),
@@ -197,7 +260,8 @@ def seed_sources(catalog) -> None:
         table.append(arrow_table)
         tg_count = sum(1 for r in rows if r["source_type"] == "telegram")
         li_count = sum(1 for r in rows if r["source_type"] == "linkedin")
-        print(f"  seeded {tg_count} TG sources, {li_count} LinkedIn sources")
+        hh_count = sum(1 for r in rows if r["source_type"] == "hh")
+        print(f"  seeded {tg_count} TG sources, {li_count} LinkedIn sources, {hh_count} HH sources")
 
 
 def main() -> None:
