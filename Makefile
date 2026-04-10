@@ -10,11 +10,15 @@ down:
 
 # Verify that all infrastructure services are healthy and reachable
 verify:
-	python scripts/verify.py
+	python3 scripts/verify.py
+
+# Initialize Iceberg catalog: create namespaces, tables, seed sources
+init:
+	python3 scripts/init_catalog.py
 
 # Run Telegram extractor — fetch new messages into Bronze layer
 scrape:
-	python extractors/tg.py scrape
+	python3 extractors/tg.py scrape
 
 # Check code style with ruff
 lint:

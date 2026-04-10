@@ -101,6 +101,36 @@ def check_pyiceberg_catalog() -> bool:
         return False
 
 
+def check_catalog_tables() -> bool:
+    """Check that required Iceberg tables exist (created by make init).
+
+    Returns False with a hint if tables are missing — init hasn't been run yet.
+    """
+    required = ["bronze.tg_messages", "meta.sources"]
+    try:
+        catalog = load_catalog("nessie", **{
+            "type": "rest",
+            "uri": NESSIE_ICEBERG_URI,
+            "warehouse": f"s3://{MINIO_BUCKET}",
+        })
+        missing = []
+        for identifier in required:
+            try:
+                catalog.load_table(identifier)
+            except Exception:
+                missing.append(identifier)
+
+        if not missing:
+            print(f"  {OK} All required tables exist: {required}")
+            return True
+        print(f"  {FAIL} Missing tables: {missing}")
+        print(f"       Run `make init` to create them.")
+        return False
+    except Exception as e:
+        print(f"  {FAIL} Could not check tables: {e}")
+        return False
+
+
 def main() -> None:
     """Run all infrastructure checks and exit with non-zero code on failure."""
     print("Verifying gridhouse infrastructure...\n")
@@ -110,6 +140,7 @@ def main() -> None:
         ("MinIO bucket", check_minio_bucket),
         ("Nessie health", check_nessie_health),
         ("PyIceberg catalog", check_pyiceberg_catalog),
+        ("Catalog tables", check_catalog_tables),
     ]
 
     results = []

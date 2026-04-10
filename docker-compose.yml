@@ -64,9 +64,18 @@ services:
       NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_ENDPOINT: http://minio:9000
       NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_PATH_STYLE_ACCESS: "true"
       NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_REGION: us-east-1
+      # STATIC auth: access-key must be a URN ref to a Quarkus-configured secret.
+      # Format: urn:nessie-secret:quarkus:<secret-name>
+      # Secret "s3creds" maps to properties s3creds.name + s3creds.secret.
+      # Quarkus env var mapping: s3creds.name → S3CREDS_NAME (dots become underscores, uppercase).
       NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_AUTH_TYPE: STATIC
-      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_ACCESS_KEY: ${MINIO_ROOT_USER}
-      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_ACCESS_KEY: "urn:nessie-secret:quarkus:s3creds"
+      # Disable remote signing — clients connect to MinIO directly.
+      # Without this Nessie returns minio:9000 as S3 endpoint (Docker-internal),
+      # which is unreachable from the host machine.
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_REMOTE_SIGNING_ENABLED: "false"
+      S3CREDS_NAME: ${MINIO_ROOT_USER}
+      S3CREDS_SECRET: ${MINIO_ROOT_PASSWORD}
     volumes:
       - nessie-data:/data
     healthcheck:

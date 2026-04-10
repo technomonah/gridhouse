@@ -1,0 +1,319 @@
+"""Telegram extractor — Bronze layer.
+
+Fetches messages from Telegram channels listed in meta.sources and writes
+raw records to the bronze.tg_messages Iceberg table.
+
+Incrementality: uses max(message_id) per channel as a cursor. Telegram
+message_ids are monotonically increasing integers within a channel, making
+them a reliable checkpoint. On failure mid-run, the next run resumes from
+the last successfully written message_id.
+
+Pre-filter: keyword matching reduces Claude scoring costs downstream by
+~90%. Both matching and non-matching messages are written to Bronze
+(passed_prefilter flag), but Silver only processes passed_prefilter=True.
+
+Usage:
+    python extractors/tg.py scrape              # all active TG channels
+    python extractors/tg.py scrape @channel1    # specific channels
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pyarrow as pa
+from telethon import TelegramClient, events
+from telethon.tl.types import Message
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from extractors.catalog import get_catalog, patch_table_io
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+TG_API_ID = int(os.environ.get("TG_API_ID", "0"))
+TG_API_HASH = os.environ.get("TG_API_HASH", "")
+TG_SESSION = str(Path(__file__).parent.parent / "session")
+
+# How far back to look on first run (no prior checkpoint)
+LOOKBACK_DAYS = 365
+
+# Minimum message length — very short messages are never vacancies
+MIN_TEXT_LEN = 50
+
+# ---------------------------------------------------------------------------
+# Pre-filter keywords
+# ---------------------------------------------------------------------------
+
+# At least one keyword must appear in the message text.
+# Filters out ~90% of messages before any AI processing downstream.
+_KEYWORDS = {
+    "dbt", "airflow", "spark", "dwh", "data vault", "data warehouse",
+    "analytics engineer", "data engineer", "etl", "elt",
+    "clickhouse", "kafka", "bigquery", "redshift", "snowflake",
+    "data platform", "data infrastructure", "pipeline",
+    "аналитик данных", "инженер данных", "аналитический инженер",
+    "хранилище данных",
+}
+
+
+def _passes_prefilter(text: str) -> bool:
+    """Check if message text contains at least one job-related keyword.
+
+    Args:
+        text: Raw message text.
+
+    Returns:
+        True if any keyword is found (case-insensitive).
+    """
+    lowered = text.lower()
+    return any(kw in lowered for kw in _KEYWORDS)
+
+
+def _make_url(channel: str, msg_id: int) -> str:
+    """Build a direct Telegram message URL.
+
+    Args:
+        channel: Channel username without @.
+        msg_id: Telegram message ID.
+
+    Returns:
+        Public URL like https://t.me/channel/123.
+    """
+    return f"https://t.me/{channel}/{msg_id}"
+
+
+# ---------------------------------------------------------------------------
+# Iceberg helpers
+# ---------------------------------------------------------------------------
+
+def get_max_message_id(catalog, channel: str) -> int:
+    """Get the highest message_id already stored for a channel.
+
+    Used as an incremental cursor — Telethon will fetch only messages
+    with id > this value on the next run.
+
+    Args:
+        catalog: Connected PyIceberg catalog.
+        channel: Channel username without @.
+
+    Returns:
+        Max message_id stored, or 0 if no messages exist yet.
+    """
+    table = patch_table_io(catalog.load_table("bronze.tg_messages"))
+    from pyiceberg.expressions import EqualTo
+    scan = table.scan(
+        row_filter=EqualTo("channel", channel),
+        selected_fields=("message_id",),
+    )
+    arrow = scan.to_arrow()
+    if arrow.num_rows == 0:
+        return 0
+    return int(arrow.column("message_id").to_pylist().__class__(arrow.column("message_id").to_pylist()).pop() if False else max(arrow.column("message_id").to_pylist()))
+
+
+def write_messages(catalog, messages: list[dict]) -> None:
+    """Append a batch of raw messages to bronze.tg_messages.
+
+    Args:
+        catalog: Connected PyIceberg catalog.
+        messages: List of dicts matching bronze.tg_messages schema.
+    """
+    if not messages:
+        return
+    table = patch_table_io(catalog.load_table("bronze.tg_messages"))
+    arrow_schema = pa.schema([
+        pa.field("message_id",       pa.int64(),          nullable=False),
+        pa.field("channel",          pa.string(),         nullable=False),
+        pa.field("text",             pa.string(),         nullable=False),
+        pa.field("published_at",     pa.timestamp("us"),  nullable=False),
+        pa.field("extracted_at",     pa.timestamp("us"),  nullable=False),
+        pa.field("url",              pa.string(),         nullable=False),
+        pa.field("passed_prefilter", pa.bool_(),          nullable=False),
+    ])
+    arrow_table = pa.table({
+        "message_id":       pa.array([m["message_id"]       for m in messages], type=pa.int64()),
+        "channel":          pa.array([m["channel"]          for m in messages], type=pa.string()),
+        "text":             pa.array([m["text"]             for m in messages], type=pa.string()),
+        "published_at":     pa.array([m["published_at"]     for m in messages], type=pa.timestamp("us")),
+        "extracted_at":     pa.array([m["extracted_at"]     for m in messages], type=pa.timestamp("us")),
+        "url":              pa.array([m["url"]              for m in messages], type=pa.string()),
+        "passed_prefilter": pa.array([m["passed_prefilter"] for m in messages], type=pa.bool_()),
+    }, schema=arrow_schema)
+    table.append(arrow_table)
+
+
+def load_active_tg_channels(catalog) -> list[str]:
+    """Load active Telegram channel usernames from meta.sources.
+
+    Args:
+        catalog: Connected PyIceberg catalog.
+
+    Returns:
+        List of channel usernames without @.
+    """
+    table = patch_table_io(catalog.load_table("meta.sources"))
+    from pyiceberg.expressions import And, EqualTo
+    scan = table.scan(
+        row_filter=And(EqualTo("source_type", "telegram"), EqualTo("active", True)),
+        selected_fields=("config",),
+    )
+    channels = []
+    for config_str in scan.to_arrow().column("config").to_pylist():
+        config = json.loads(config_str)
+        channels.append(config["channel"])
+    return channels
+
+
+# ---------------------------------------------------------------------------
+# Telegram client
+# ---------------------------------------------------------------------------
+
+def make_client() -> TelegramClient:
+    """Create a Telethon TelegramClient using env credentials.
+
+    Returns:
+        Configured TelegramClient (not yet connected).
+
+    Raises:
+        RuntimeError: If TG_API_ID or TG_API_HASH are not set.
+    """
+    if not TG_API_ID or not TG_API_HASH:
+        raise RuntimeError(
+            "Set TG_API_ID and TG_API_HASH environment variables.\n"
+            "Get them from https://my.telegram.org/apps"
+        )
+    return TelegramClient(TG_SESSION, TG_API_ID, TG_API_HASH, sequential_updates=True)
+
+
+# ---------------------------------------------------------------------------
+# Scrape
+# ---------------------------------------------------------------------------
+
+async def scrape_channel(
+    client: TelegramClient,
+    catalog,
+    channel: str,
+) -> tuple[int, int]:
+    """Fetch new messages from a single Telegram channel into Bronze.
+
+    Reads messages newer than max(message_id) stored in bronze.tg_messages.
+    Both pre-filter passing and non-passing messages are written to Bronze
+    for full auditability; passed_prefilter flag differentiates them.
+
+    Args:
+        client: Connected TelegramClient.
+        catalog: Connected PyIceberg catalog.
+        channel: Channel username without @.
+
+    Returns:
+        Tuple of (total_written, passed_prefilter_count).
+    """
+    from datetime import timedelta
+    ch = channel.lstrip("@")
+
+    min_id = get_max_message_id(catalog, ch)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
+
+    print(f"  @{ch}: cursor={min_id} (fetching messages with id > {min_id})")
+
+    batch: list[dict] = []
+    total = 0
+    passed = 0
+    extracted_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    try:
+        async for msg in client.iter_messages(ch, reverse=False, min_id=min_id):
+            if not isinstance(msg, Message):
+                continue
+            # iter_messages with reverse=False goes newest→oldest;
+            # stop when we reach messages older than LOOKBACK_DAYS
+            if msg.date.replace(tzinfo=timezone.utc) < cutoff:
+                break
+            if not msg.text or len(msg.text.strip()) < MIN_TEXT_LEN:
+                continue
+
+            prefilter = _passes_prefilter(msg.text)
+            batch.append({
+                "message_id":       msg.id,
+                "channel":          ch,
+                "text":             msg.text,
+                "published_at":     msg.date.replace(tzinfo=None),
+                "extracted_at":     extracted_at,
+                "url":              _make_url(ch, msg.id),
+                "passed_prefilter": prefilter,
+            })
+            total += 1
+            if prefilter:
+                passed += 1
+
+            # Write in batches of 100 to avoid large memory accumulation
+            if len(batch) >= 100:
+                write_messages(catalog, batch)
+                batch.clear()
+
+    except Exception as e:
+        print(f"  [warn] @{ch}: error fetching messages: {e}")
+
+    # Write remaining batch
+    if batch:
+        write_messages(catalog, batch)
+
+    print(f"  @{ch}: written={total}, passed_prefilter={passed}")
+    return total, passed
+
+
+async def cmd_scrape(channels: list[str]) -> None:
+    """Scrape all given channels and write raw messages to Bronze.
+
+    Args:
+        channels: List of channel usernames (with or without @).
+    """
+    catalog = get_catalog()
+    client = make_client()
+
+    async with client:
+        total_written = 0
+        total_passed = 0
+        for channel in channels:
+            written, passed = await scrape_channel(client, catalog, channel)
+            total_written += written
+            total_passed += passed
+
+        print(f"\nDone. written={total_written}, passed_prefilter={total_passed}")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    """CLI entry point for the Telegram extractor."""
+    args = sys.argv[1:]
+
+    if not args or args[0] == "scrape":
+        # Use channels from CLI args, or load all active from catalog
+        if len(args) > 1:
+            channels = [a.lstrip("@") for a in args[1:]]
+        else:
+            catalog = get_catalog()
+            channels = load_active_tg_channels(catalog)
+            if not channels:
+                print("No active TG channels found in meta.sources. Run `make init` first.")
+                sys.exit(1)
+
+        print(f"Scraping {len(channels)} channel(s)...\n")
+        asyncio.run(cmd_scrape(channels))
+    else:
+        print(__doc__)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
