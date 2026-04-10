@@ -1,4 +1,4 @@
-.PHONY: up down verify scrape lint fmt
+.PHONY: up down verify init gen-session scrape lint fmt
 
 # Start all infrastructure services (MinIO, Nessie) in background
 up:
@@ -15,6 +15,10 @@ verify:
 # Initialize Iceberg catalog: create namespaces, tables, seed sources
 init:
 	python3 scripts/init_catalog.py
+
+# Authenticate with Telegram once and print TG_SESSION_STRING for .env
+gen-session:
+	python3 scripts/gen_session.py
 
 # Run Telegram extractor — fetch new messages into Bronze layer
 scrape:
