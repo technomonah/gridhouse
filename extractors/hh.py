@@ -37,7 +37,7 @@ from extractors.catalog import get_catalog, patch_table_io
 
 # Required by HH.ru TOS — identify your application.
 # Format: "AppName/1.0 (contact@example.com)"
-HH_USER_AGENT = os.environ.get("HH_USER_AGENT", "gridhouse-extractor/1.0")
+HH_USER_AGENT = os.environ.get("HH_USER_AGENT", "grindhouse-extractor/1.0")
 
 # HH API returns up to 100 results per page (hard limit).
 HH_PER_PAGE = int(os.environ.get("HH_PER_PAGE", "100"))

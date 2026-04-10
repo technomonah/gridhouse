@@ -1,4 +1,4 @@
-# gridhouse — CLAUDE.md
+# grindhouse — CLAUDE.md
 
 ## Project
 

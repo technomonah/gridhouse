@@ -3,7 +3,7 @@ services:
     # S3-compatible object storage — holds all Iceberg data files (Parquet).
     # Console UI available at http://localhost:9001
     image: minio/minio:latest
-    container_name: gridhouse-minio
+    container_name: grindhouse-minio
     ports:
       - "9000:9000"   # S3 API
       - "9001:9001"   # Web console
@@ -25,7 +25,7 @@ services:
     # One-time init container — creates the warehouse bucket if it doesn't exist.
     # Runs after MinIO is healthy, then exits. Nessie waits for this to complete.
     image: minio/mc:latest
-    container_name: gridhouse-minio-init
+    container_name: grindhouse-minio-init
     depends_on:
       minio:
         condition: service_healthy
@@ -45,7 +45,7 @@ services:
     # REST API available at http://localhost:19120/api/v1
     # Iceberg REST endpoint: http://localhost:19120/iceberg/main
     image: ghcr.io/projectnessie/nessie:latest
-    container_name: gridhouse-nessie
+    container_name: grindhouse-nessie
     ports:
       - "19120:19120"
     depends_on:

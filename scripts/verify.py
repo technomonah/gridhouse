@@ -133,7 +133,7 @@ def check_catalog_tables() -> bool:
 
 def main() -> None:
     """Run all infrastructure checks and exit with non-zero code on failure."""
-    print("Verifying gridhouse infrastructure...\n")
+    print("Verifying grindhouse infrastructure...\n")
 
     checks = [
         ("MinIO API", check_minio_api),

@@ -1,5 +1,5 @@
 [project]
-name = "gridhouse"
+name = "grindhouse"
 version = "0.1.0"
 description = "Job hunting lakehouse"
 requires-python = ">=3.11"

@@ -1,4 +1,4 @@
-# gridhouse
+# grindhouse
 
 Job hunting lakehouse — automated vacancy collection, AI scoring, and applying via modern DE stack.
 
