@@ -15,6 +15,7 @@ dist/
 
 # LinkedIn Selenium
 linkedin-session/
+linkedin-cookies.json
 
 # macOS
 .DS_Store

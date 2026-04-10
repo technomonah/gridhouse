@@ -1,4 +1,4 @@
-.PHONY: up down verify init gen-session scrape lint fmt
+.PHONY: up down verify init gen-session scrape scrape-linkedin lint fmt
 
 # Start all infrastructure services (MinIO, Nessie) in background
 up:
@@ -23,6 +23,10 @@ gen-session:
 # Run Telegram extractor — fetch new messages into Bronze layer
 scrape:
 	python3 extractors/tg.py scrape
+
+# Run LinkedIn extractor — fetch new hiring posts into Bronze layer
+scrape-linkedin:
+	python3 extractors/linkedin.py scrape
 
 # Check code style with ruff
 lint:

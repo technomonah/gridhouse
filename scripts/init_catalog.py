@@ -43,6 +43,22 @@ BRONZE_TG_MESSAGES_SCHEMA = Schema(
     NestedField(7,  "passed_prefilter", BooleanType(),   required=True),
 )
 
+# Raw LinkedIn hiring posts. published_at_raw stores relative time as returned
+# by LinkedIn ("2 ч.", "1 дн.") — exact timestamps are not available in the DOM.
+BRONZE_LINKEDIN_POSTS_SCHEMA = Schema(
+    NestedField(1,  "post_id",          StringType(),    required=True),
+    NestedField(2,  "post_url",         StringType(),    required=True),
+    NestedField(3,  "author",           StringType(),    required=True),
+    NestedField(4,  "author_url",       StringType(),    required=True),
+    NestedField(5,  "company",          StringType(),    required=True),
+    NestedField(6,  "company_url",      StringType(),    required=True),
+    NestedField(7,  "text",             StringType(),    required=True),
+    NestedField(8,  "published_at_raw", StringType(),    required=True),
+    NestedField(9,  "query",            StringType(),    required=True),
+    NestedField(10, "extracted_at",     TimestampType(), required=True),
+    NestedField(11, "passed_prefilter", BooleanType(),   required=True),
+)
+
 # Registry of all data sources. Extractors read active sources from here
 # instead of having channel lists hardcoded in scripts.
 SOURCES_SCHEMA = Schema(
@@ -66,6 +82,11 @@ _TG_CHANNELS = [
     "datascienceml_jobs",
     "job_analyst_datascience",
     "foranalysts",
+]
+
+_LINKEDIN_QUERIES = [
+    '"Analytics Engineer" hiring',
+    'dbt "data engineer" hiring',
 ]
 
 
@@ -95,8 +116,9 @@ def init_tables(catalog) -> None:
         catalog: Connected PyIceberg catalog instance.
     """
     tables = [
-        ("bronze.tg_messages", BRONZE_TG_MESSAGES_SCHEMA),
-        ("meta.sources",       SOURCES_SCHEMA),
+        ("bronze.tg_messages",      BRONZE_TG_MESSAGES_SCHEMA),
+        ("bronze.linkedin_posts",   BRONZE_LINKEDIN_POSTS_SCHEMA),
+        ("meta.sources",            SOURCES_SCHEMA),
     ]
     for identifier, schema in tables:
         try:
@@ -139,13 +161,29 @@ def seed_sources(catalog) -> None:
             "added_at":    now,
         })
 
+    # Seed LinkedIn queries
+    for query in _LINKEDIN_QUERIES:
+        slug = query.lower().replace('"', "").replace(" ", "_")[:40]
+        source_id = f"linkedin_{slug}"
+        if source_id in existing:
+            print(f"  source exists:  {source_id}")
+            continue
+        rows.append({
+            "source_id":   source_id,
+            "source_type": "linkedin",
+            "name":        query,
+            "config":      json.dumps({"query": query}),
+            "active":      True,
+            "added_at":    now,
+        })
+
     if rows:
         arrow_schema = pa.schema([
-            pa.field("source_id",   pa.string(),       nullable=False),
-            pa.field("source_type", pa.string(),       nullable=False),
-            pa.field("name",        pa.string(),       nullable=False),
-            pa.field("config",      pa.string(),       nullable=False),
-            pa.field("active",      pa.bool_(),        nullable=False),
+            pa.field("source_id",   pa.string(),        nullable=False),
+            pa.field("source_type", pa.string(),        nullable=False),
+            pa.field("name",        pa.string(),        nullable=False),
+            pa.field("config",      pa.string(),        nullable=False),
+            pa.field("active",      pa.bool_(),         nullable=False),
             pa.field("added_at",    pa.timestamp("us"), nullable=False),
         ])
         arrow_table = pa.table({
@@ -157,7 +195,9 @@ def seed_sources(catalog) -> None:
             "added_at":    pa.array([r["added_at"]    for r in rows], type=pa.timestamp("us")),
         }, schema=arrow_schema)
         table.append(arrow_table)
-        print(f"  seeded {len(rows)} TG sources")
+        tg_count = sum(1 for r in rows if r["source_type"] == "telegram")
+        li_count = sum(1 for r in rows if r["source_type"] == "linkedin")
+        print(f"  seeded {tg_count} TG sources, {li_count} LinkedIn sources")
 
 
 def main() -> None:
