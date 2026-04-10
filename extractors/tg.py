@@ -33,6 +33,7 @@ from telethon.tl.types import Message
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from extractors.catalog import get_catalog, patch_table_io
+from extractors.common import RawVacancy, passes_prefilter
 
 # ---------------------------------------------------------------------------
 # Config
@@ -51,33 +52,8 @@ LOOKBACK_DAYS = 365
 MIN_TEXT_LEN = 50
 
 # ---------------------------------------------------------------------------
-# Pre-filter keywords
+# Helpers
 # ---------------------------------------------------------------------------
-
-# At least one keyword must appear in the message text.
-# Filters out ~90% of messages before any AI processing downstream.
-_KEYWORDS = {
-    "dbt", "airflow", "spark", "dwh", "data vault", "data warehouse",
-    "analytics engineer", "data engineer", "etl", "elt",
-    "clickhouse", "kafka", "bigquery", "redshift", "snowflake",
-    "data platform", "data infrastructure", "pipeline",
-    "аналитик данных", "инженер данных", "аналитический инженер",
-    "хранилище данных",
-}
-
-
-def _passes_prefilter(text: str) -> bool:
-    """Check if message text contains at least one job-related keyword.
-
-    Args:
-        text: Raw message text.
-
-    Returns:
-        True if any keyword is found (case-insensitive).
-    """
-    lowered = text.lower()
-    return any(kw in lowered for kw in _KEYWORDS)
-
 
 def _make_url(channel: str, msg_id: int) -> str:
     """Build a direct Telegram message URL.
@@ -121,12 +97,12 @@ def get_max_message_id(catalog, channel: str) -> int:
     return int(arrow.column("message_id").to_pylist().__class__(arrow.column("message_id").to_pylist()).pop() if False else max(arrow.column("message_id").to_pylist()))
 
 
-def write_messages(catalog, messages: list[dict]) -> None:
+def write_messages(catalog, messages: list[RawVacancy]) -> None:
     """Append a batch of raw messages to bronze.tg_messages.
 
     Args:
         catalog: Connected PyIceberg catalog.
-        messages: List of dicts matching bronze.tg_messages schema.
+        messages: List of RawVacancy instances from the Telegram extractor.
     """
     if not messages:
         return
@@ -141,13 +117,13 @@ def write_messages(catalog, messages: list[dict]) -> None:
         pa.field("passed_prefilter", pa.bool_(),          nullable=False),
     ])
     arrow_table = pa.table({
-        "message_id":       pa.array([m["message_id"]       for m in messages], type=pa.int64()),
-        "channel":          pa.array([m["channel"]          for m in messages], type=pa.string()),
-        "text":             pa.array([m["text"]             for m in messages], type=pa.string()),
-        "published_at":     pa.array([m["published_at"]     for m in messages], type=pa.timestamp("us")),
-        "extracted_at":     pa.array([m["extracted_at"]     for m in messages], type=pa.timestamp("us")),
-        "url":              pa.array([m["url"]              for m in messages], type=pa.string()),
-        "passed_prefilter": pa.array([m["passed_prefilter"] for m in messages], type=pa.bool_()),
+        "message_id":       pa.array([int(m.source_id)        for m in messages], type=pa.int64()),
+        "channel":          pa.array([m.extra["channel"]       for m in messages], type=pa.string()),
+        "text":             pa.array([m.text                   for m in messages], type=pa.string()),
+        "published_at":     pa.array([m.published_at           for m in messages], type=pa.timestamp("us")),
+        "extracted_at":     pa.array([m.extracted_at           for m in messages], type=pa.timestamp("us")),
+        "url":              pa.array([m.url                    for m in messages], type=pa.string()),
+        "passed_prefilter": pa.array([m.passed_prefilter       for m in messages], type=pa.bool_()),
     }, schema=arrow_schema)
     table.append(arrow_table)
 
@@ -229,7 +205,7 @@ async def scrape_channel(
 
     print(f"  @{ch}: cursor={min_id} (fetching messages with id > {min_id})")
 
-    batch: list[dict] = []
+    batch: list[RawVacancy] = []
     total = 0
     passed = 0
     extracted_at = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -245,16 +221,17 @@ async def scrape_channel(
             if not msg.text or len(msg.text.strip()) < MIN_TEXT_LEN:
                 continue
 
-            prefilter = _passes_prefilter(msg.text)
-            batch.append({
-                "message_id":       msg.id,
-                "channel":          ch,
-                "text":             msg.text,
-                "published_at":     msg.date.replace(tzinfo=None),
-                "extracted_at":     extracted_at,
-                "url":              _make_url(ch, msg.id),
-                "passed_prefilter": prefilter,
-            })
+            prefilter = passes_prefilter(msg.text)
+            batch.append(RawVacancy(
+                source="telegram",
+                source_id=str(msg.id),
+                url=_make_url(ch, msg.id),
+                text=msg.text,
+                published_at=msg.date.replace(tzinfo=None),
+                extracted_at=extracted_at,
+                passed_prefilter=prefilter,
+                extra={"channel": ch, "message_id": msg.id},
+            ))
             total += 1
             if prefilter:
                 passed += 1

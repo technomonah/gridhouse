@@ -30,6 +30,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from extractors.catalog import get_catalog, patch_table_io
+from extractors.common import RawVacancy, passes_prefilter
 
 # ---------------------------------------------------------------------------
 # Config
@@ -49,33 +50,6 @@ HH_MAX_PAGES = int(os.environ.get("HH_MAX_PAGES", "20"))
 HH_PAGE_DELAY = float(os.environ.get("HH_PAGE_DELAY", "0.5"))
 
 HH_API_BASE = "https://api.hh.ru"
-
-# ---------------------------------------------------------------------------
-# Pre-filter keywords (duplicated from tg.py to avoid circular imports)
-# ---------------------------------------------------------------------------
-
-_KEYWORDS = {
-    "dbt", "airflow", "spark", "dwh", "data vault", "data warehouse",
-    "analytics engineer", "data engineer", "etl", "elt",
-    "clickhouse", "kafka", "bigquery", "redshift", "snowflake",
-    "data platform", "data infrastructure", "pipeline",
-    "аналитик данных", "инженер данных", "аналитический инженер",
-    "хранилище данных",
-}
-
-
-def _passes_prefilter(text: str) -> bool:
-    """Check if vacancy text contains at least one job-related keyword.
-
-    Args:
-        text: Combined vacancy name + snippet text.
-
-    Returns:
-        True if any keyword is found (case-insensitive).
-    """
-    lowered = text.lower()
-    return any(kw in lowered for kw in _KEYWORDS)
-
 
 # ---------------------------------------------------------------------------
 # Iceberg helpers
@@ -101,12 +75,12 @@ def get_seen_vacancy_ids(catalog) -> set[str]:
     return set(arrow.column("vacancy_id").to_pylist())
 
 
-def write_vacancies(catalog, vacancies: list[dict]) -> None:
+def write_vacancies(catalog, vacancies: list[RawVacancy]) -> None:
     """Append a batch of raw vacancies to bronze.hh_vacancies.
 
     Args:
         catalog: Connected PyIceberg catalog.
-        vacancies: List of dicts matching bronze.hh_vacancies schema.
+        vacancies: List of RawVacancy instances from the HH extractor.
     """
     if not vacancies:
         return
@@ -134,26 +108,26 @@ def write_vacancies(catalog, vacancies: list[dict]) -> None:
         pa.field("passed_prefilter", pa.bool_(),          nullable=False),
     ])
     arrow_table = pa.table({
-        "vacancy_id":       pa.array([v["vacancy_id"]       for v in vacancies], type=pa.string()),
-        "vacancy_url":      pa.array([v["vacancy_url"]      for v in vacancies], type=pa.string()),
-        "vacancy_name":     pa.array([v["vacancy_name"]     for v in vacancies], type=pa.string()),
-        "employer_id":      pa.array([v["employer_id"]      for v in vacancies], type=pa.string()),
-        "employer_name":    pa.array([v["employer_name"]    for v in vacancies], type=pa.string()),
-        "salary_from":      pa.array([v["salary_from"]      for v in vacancies], type=pa.int64()),
-        "salary_to":        pa.array([v["salary_to"]        for v in vacancies], type=pa.int64()),
-        "salary_currency":  pa.array([v["salary_currency"]  for v in vacancies], type=pa.string()),
-        "salary_gross":     pa.array([v["salary_gross"]     for v in vacancies], type=pa.bool_()),
-        "area_id":          pa.array([v["area_id"]          for v in vacancies], type=pa.string()),
-        "area_name":        pa.array([v["area_name"]        for v in vacancies], type=pa.string()),
-        "experience":       pa.array([v["experience"]       for v in vacancies], type=pa.string()),
-        "employment":       pa.array([v["employment"]       for v in vacancies], type=pa.string()),
-        "schedule":         pa.array([v["schedule"]         for v in vacancies], type=pa.string()),
-        "snippet_req":      pa.array([v["snippet_req"]      for v in vacancies], type=pa.string()),
-        "snippet_resp":     pa.array([v["snippet_resp"]     for v in vacancies], type=pa.string()),
-        "published_at":     pa.array([v["published_at"]     for v in vacancies], type=pa.timestamp("us")),
-        "extracted_at":     pa.array([v["extracted_at"]     for v in vacancies], type=pa.timestamp("us")),
-        "search_query":     pa.array([v["search_query"]     for v in vacancies], type=pa.string()),
-        "passed_prefilter": pa.array([v["passed_prefilter"] for v in vacancies], type=pa.bool_()),
+        "vacancy_id":       pa.array([v.source_id                  for v in vacancies], type=pa.string()),
+        "vacancy_url":      pa.array([v.url                        for v in vacancies], type=pa.string()),
+        "vacancy_name":     pa.array([v.extra["vacancy_name"]      for v in vacancies], type=pa.string()),
+        "employer_id":      pa.array([v.extra["employer_id"]       for v in vacancies], type=pa.string()),
+        "employer_name":    pa.array([v.extra["employer_name"]     for v in vacancies], type=pa.string()),
+        "salary_from":      pa.array([v.extra["salary_from"]       for v in vacancies], type=pa.int64()),
+        "salary_to":        pa.array([v.extra["salary_to"]         for v in vacancies], type=pa.int64()),
+        "salary_currency":  pa.array([v.extra["salary_currency"]   for v in vacancies], type=pa.string()),
+        "salary_gross":     pa.array([v.extra["salary_gross"]      for v in vacancies], type=pa.bool_()),
+        "area_id":          pa.array([v.extra["area_id"]           for v in vacancies], type=pa.string()),
+        "area_name":        pa.array([v.extra["area_name"]         for v in vacancies], type=pa.string()),
+        "experience":       pa.array([v.extra["experience"]        for v in vacancies], type=pa.string()),
+        "employment":       pa.array([v.extra["employment"]        for v in vacancies], type=pa.string()),
+        "schedule":         pa.array([v.extra["schedule"]          for v in vacancies], type=pa.string()),
+        "snippet_req":      pa.array([v.extra["snippet_req"]       for v in vacancies], type=pa.string()),
+        "snippet_resp":     pa.array([v.extra["snippet_resp"]      for v in vacancies], type=pa.string()),
+        "published_at":     pa.array([v.published_at               for v in vacancies], type=pa.timestamp("us")),
+        "extracted_at":     pa.array([v.extracted_at               for v in vacancies], type=pa.timestamp("us")),
+        "search_query":     pa.array([v.extra["search_query"]      for v in vacancies], type=pa.string()),
+        "passed_prefilter": pa.array([v.passed_prefilter           for v in vacancies], type=pa.bool_()),
     }, schema=arrow_schema)
     table.append(arrow_table)
 
@@ -183,7 +157,7 @@ def load_active_hh_searches(catalog) -> list[dict]:
 # HH API
 # ---------------------------------------------------------------------------
 
-def _parse_vacancy(item: dict, search_query: str, extracted_at: datetime) -> dict:
+def _parse_vacancy(item: dict, search_query: str, extracted_at: datetime) -> RawVacancy:
     """Parse a single vacancy item from HH API search response.
 
     Args:
@@ -192,7 +166,7 @@ def _parse_vacancy(item: dict, search_query: str, extracted_at: datetime) -> dic
         extracted_at: Timestamp of this extraction run.
 
     Returns:
-        Dict matching bronze.hh_vacancies schema.
+        RawVacancy instance with HH-specific fields in ``extra``.
     """
     salary = item.get("salary") or {}
     # salary_range supersedes salary in newer API versions
@@ -220,29 +194,34 @@ def _parse_vacancy(item: dict, search_query: str, extracted_at: datetime) -> dic
 
     salary_from = salary_range.get("from")
     salary_to = salary_range.get("to")
+    vacancy_id = str(item["id"])
 
-    return {
-        "vacancy_id":       str(item["id"]),
-        "vacancy_url":      item.get("alternate_url", ""),
-        "vacancy_name":     item.get("name", ""),
-        "employer_id":      str(employer["id"]) if employer.get("id") else None,
-        "employer_name":    employer.get("name", ""),
-        "salary_from":      int(salary_from) if salary_from is not None else None,
-        "salary_to":        int(salary_to) if salary_to is not None else None,
-        "salary_currency":  salary_range.get("currency"),
-        "salary_gross":     salary_range.get("gross"),
-        "area_id":          str(area.get("id", "")),
-        "area_name":        area.get("name", ""),
-        "experience":       experience.get("id", ""),
-        "employment":       employment.get("id", ""),
-        "schedule":         schedule.get("id", ""),
-        "snippet_req":      snippet.get("requirement"),
-        "snippet_resp":     snippet.get("responsibility"),
-        "published_at":     published_at,
-        "extracted_at":     extracted_at,
-        "search_query":     search_query,
-        "passed_prefilter": _passes_prefilter(prefilter_text),
-    }
+    return RawVacancy(
+        source="hh",
+        source_id=vacancy_id,
+        url=item.get("alternate_url", ""),
+        text=prefilter_text,
+        published_at=published_at,
+        extracted_at=extracted_at,
+        passed_prefilter=passes_prefilter(prefilter_text),
+        extra={
+            "vacancy_name":    item.get("name", ""),
+            "employer_id":     str(employer["id"]) if employer.get("id") else None,
+            "employer_name":   employer.get("name", ""),
+            "salary_from":     int(salary_from) if salary_from is not None else None,
+            "salary_to":       int(salary_to) if salary_to is not None else None,
+            "salary_currency": salary_range.get("currency"),
+            "salary_gross":    salary_range.get("gross"),
+            "area_id":         str(area.get("id", "")),
+            "area_name":       area.get("name", ""),
+            "experience":      experience.get("id", ""),
+            "employment":      employment.get("id", ""),
+            "schedule":        schedule.get("id", ""),
+            "snippet_req":     snippet.get("requirement"),
+            "snippet_resp":    snippet.get("responsibility"),
+            "search_query":    search_query,
+        },
+    )
 
 
 def fetch_vacancies(search_config: dict) -> list[dict]:
@@ -335,13 +314,13 @@ def scrape_search(catalog, search_config: dict, seen_ids: set[str]) -> tuple[int
 
     all_vacancies = fetch_vacancies(search_config)
 
-    new_vacancies = [v for v in all_vacancies if v["vacancy_id"] not in seen_ids]
-    passed = sum(1 for v in new_vacancies if v["passed_prefilter"])
+    new_vacancies = [v for v in all_vacancies if v.source_id not in seen_ids]
+    passed = sum(1 for v in new_vacancies if v.passed_prefilter)
 
     if new_vacancies:
         write_vacancies(catalog, new_vacancies)
         for v in new_vacancies:
-            seen_ids.add(v["vacancy_id"])
+            seen_ids.add(v.source_id)
 
     skipped = len(all_vacancies) - len(new_vacancies)
     print(f"  fetched={len(all_vacancies)}, new={len(new_vacancies)}, skipped={skipped}, passed_prefilter={passed}")

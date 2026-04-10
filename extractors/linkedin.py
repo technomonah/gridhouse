@@ -36,7 +36,7 @@ import pyarrow as pa
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from extractors.catalog import get_catalog, patch_table_io
-from extractors.tg import _passes_prefilter
+from extractors.common import RawVacancy, passes_prefilter
 
 try:
     from selenium import webdriver
@@ -110,12 +110,12 @@ def get_seen_post_ids(catalog) -> set[str]:
     return set(arrow.column("post_id").to_pylist())
 
 
-def write_posts(catalog, posts: list[dict]) -> None:
+def write_posts(catalog, posts: list[RawVacancy]) -> None:
     """Append a batch of LinkedIn posts to bronze.linkedin_posts.
 
     Args:
         catalog: Connected PyIceberg catalog.
-        posts: List of dicts matching bronze.linkedin_posts schema.
+        posts: List of RawVacancy instances from the LinkedIn extractor.
     """
     if not posts:
         return
@@ -135,17 +135,17 @@ def write_posts(catalog, posts: list[dict]) -> None:
     ])
     arrow_table = pa.table(
         {
-            "post_id":          pa.array([p["post_id"]          for p in posts], type=pa.string()),
-            "post_url":         pa.array([p["post_url"]         for p in posts], type=pa.string()),
-            "author":           pa.array([p["author"]           for p in posts], type=pa.string()),
-            "author_url":       pa.array([p["author_url"]       for p in posts], type=pa.string()),
-            "company":          pa.array([p["company"]          for p in posts], type=pa.string()),
-            "company_url":      pa.array([p["company_url"]      for p in posts], type=pa.string()),
-            "text":             pa.array([p["text"]             for p in posts], type=pa.string()),
-            "published_at_raw": pa.array([p["published_at_raw"] for p in posts], type=pa.string()),
-            "query":            pa.array([p["query"]            for p in posts], type=pa.string()),
-            "extracted_at":     pa.array([p["extracted_at"]     for p in posts], type=pa.timestamp("us")),
-            "passed_prefilter": pa.array([p["passed_prefilter"] for p in posts], type=pa.bool_()),
+            "post_id":          pa.array([p.source_id                  for p in posts], type=pa.string()),
+            "post_url":         pa.array([p.url                        for p in posts], type=pa.string()),
+            "author":           pa.array([p.extra["author"]            for p in posts], type=pa.string()),
+            "author_url":       pa.array([p.extra["author_url"]        for p in posts], type=pa.string()),
+            "company":          pa.array([p.extra["company"]           for p in posts], type=pa.string()),
+            "company_url":      pa.array([p.extra["company_url"]       for p in posts], type=pa.string()),
+            "text":             pa.array([p.text                       for p in posts], type=pa.string()),
+            "published_at_raw": pa.array([p.extra["published_at_raw"]  for p in posts], type=pa.string()),
+            "query":            pa.array([p.extra["query"]             for p in posts], type=pa.string()),
+            "extracted_at":     pa.array([p.extracted_at               for p in posts], type=pa.timestamp("us")),
+            "passed_prefilter": pa.array([p.passed_prefilter           for p in posts], type=pa.bool_()),
         },
         schema=arrow_schema,
     )
@@ -306,7 +306,7 @@ def _patch_fetch_interceptor(driver) -> None:
     """)
 
 
-def _resolve_post_urls(driver, posts: list[dict]) -> list[dict]:
+def _resolve_post_urls(driver, posts: list[RawVacancy]) -> list[RawVacancy]:
     """Resolve surrogate ck:-prefixed post IDs to real LinkedIn feed URLs.
 
     For posts without a direct /feed/update/ link in the DOM, clicks the
@@ -315,16 +315,16 @@ def _resolve_post_urls(driver, posts: list[dict]) -> list[dict]:
 
     Args:
         driver: Selenium WebDriver instance.
-        posts: List of post dicts, some may have post_url starting with "ck:".
+        posts: List of RawVacancy instances, some may have url starting with "ck:".
 
     Returns:
         Same list with ck: URLs replaced by real feed URLs where possible.
     """
     for row in posts:
-        if not row["post_url"].startswith("ck:"):
+        if not row.url.startswith("ck:"):
             continue
         try:
-            ck = row["post_url"][3:]
+            ck = row.url[3:]
             driver.execute_script("window.__menuUrn = null;")
             driver.execute_script("""
                 const ck = arguments[0];
@@ -340,8 +340,9 @@ def _resolve_post_urls(driver, posts: list[dict]) -> list[dict]:
             )
             urn = driver.execute_script("return window.__menuUrn || null;")
             if urn:
-                row["post_url"] = f"https://www.linkedin.com/feed/update/{urn}/"
-                row["post_id"] = row["post_url"]
+                real_url = f"https://www.linkedin.com/feed/update/{urn}/"
+                row.url = real_url
+                row.source_id = real_url
             _human_sleep(0.5, 1.0)
         except Exception:
             pass
@@ -392,7 +393,7 @@ def scrape_query(
     _human_sleep(3, 5)
 
     extracted_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    batch: list[dict] = []
+    batch: list[RawVacancy] = []
     total_new = 0
     scroll_rounds = 0
 
@@ -450,19 +451,24 @@ def scrape_query(
             if not post_id or post_id in seen_ids:
                 continue
             seen_ids.add(post_id)
-            batch.append({
-                "post_id":          post_id,
-                "post_url":         p.get("postUrl", post_id),
-                "author":           p.get("author", ""),
-                "author_url":       p.get("authorUrl", ""),
-                "company":          p.get("company", ""),
-                "company_url":      p.get("companyUrl", ""),
-                "text":             p.get("text", ""),
-                "published_at_raw": p.get("date", ""),
-                "query":            query,
-                "extracted_at":     extracted_at,
-                "passed_prefilter": _passes_prefilter(p.get("text", "")),
-            })
+            text = p.get("text", "")
+            batch.append(RawVacancy(
+                source="linkedin",
+                source_id=post_id,
+                url=p.get("postUrl", post_id),
+                text=text,
+                published_at=None,
+                extracted_at=extracted_at,
+                passed_prefilter=passes_prefilter(text),
+                extra={
+                    "author":           p.get("author", ""),
+                    "author_url":       p.get("authorUrl", ""),
+                    "company":          p.get("company", ""),
+                    "company_url":      p.get("companyUrl", ""),
+                    "published_at_raw": p.get("date", ""),
+                    "query":            query,
+                },
+            ))
             total_new += 1
             if total_new >= limit:
                 break
@@ -476,11 +482,6 @@ def scrape_query(
 
     # Resolve surrogate ck: IDs to real feed URLs
     batch = _resolve_post_urls(driver, batch)
-
-    # Fix post_id for resolved rows
-    for row in batch:
-        if not row["post_id"].startswith("ck:"):
-            row["post_id"] = row["post_url"]
 
     write_posts(catalog, batch)
     print(f"  ✓ Written: {total_new} new posts")
