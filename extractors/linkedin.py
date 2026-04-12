@@ -1,37 +1,48 @@
 """LinkedIn extractor — Bronze layer.
 
-Scrapes LinkedIn search results for hiring posts and writes raw records
-to the bronze.linkedin_posts Iceberg table.
+Two-stage pipeline: fetch → parse.
+
+  fetch  — navigates LinkedIn search pages, saves fully-rendered MHTML
+           snapshots to the MinIO landing zone. No parsing, no Iceberg writes.
+  parse  — reads saved MHTML files from MinIO, extracts post cards, writes
+           RawVacancy records to bronze.linkedin_posts.
+  scrape — convenience command that runs fetch then parse (full cycle).
+
+Landing zone path: s3://warehouse/landing/linkedin/YYYY-MM-DD/HHMMSS_{slug}.mhtml
 
 Authentication: uses a cookies file (linkedin-cookies.json) exported from
-a logged-in browser session via Cookie-Editor extension. No API key required.
+a logged-in browser session via Cookie-Editor extension.
 
-Incrementality: deduplicates by post_id against existing bronze.linkedin_posts
-records. On re-run, already-seen posts are skipped.
+Incrementality: parse deduplicates by post_id against existing
+bronze.linkedin_posts records. On re-run, already-seen posts are skipped.
 
-Pre-filter: reuses the same keyword filter as the Telegram extractor to flag
-posts relevant for AI scoring downstream.
+Pre-filter: uses shared keyword filter from common.py to flag relevant posts.
 
-Note: LinkedIn returns relative timestamps only ("2 ч.", "1 дн.") — exact
-publish time is not available without additional requests, so published_at_raw
-stores the raw string as-is.
+Note: LinkedIn relative timestamps ("2 ч.", "1 дн.") are not available in
+static MHTML — published_at_raw will be empty for MHTML-parsed posts.
 
 Usage:
-    python extractors/linkedin.py scrape              # all active LinkedIn queries
-    python extractors/linkedin.py scrape "dbt hiring" # specific query
+    python extractors/linkedin.py fetch              # all active LinkedIn queries
+    python extractors/linkedin.py fetch "dbt hiring" # specific query
+    python extractors/linkedin.py parse              # parse today's landing files
+    python extractors/linkedin.py parse 2025-04-12   # parse specific date
+    python extractors/linkedin.py scrape             # fetch + parse (full cycle)
 """
 
 from __future__ import annotations
 
+import email as email_lib
 import json
 import os
 import random
+import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote, quote_plus, unquote
 
+import boto3
 import pyarrow as pa
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -50,32 +61,45 @@ except ImportError:
 # Config
 # ---------------------------------------------------------------------------
 
-_GRIDHOUSE_ROOT = Path(__file__).parent.parent
+_GRINDHOUSE_ROOT = Path(__file__).parent.parent
 
 COOKIES_FILE = Path(
-    os.environ.get("LINKEDIN_COOKIES_FILE", str(_GRIDHOUSE_ROOT / "linkedin-cookies.json"))
+    os.environ.get("LINKEDIN_COOKIES_FILE", str(_GRINDHOUSE_ROOT / "linkedin-cookies.json"))
 )
 SESSION_DIR = Path(
-    os.environ.get("LINKEDIN_SESSION_DIR", str(_GRIDHOUSE_ROOT / "linkedin-session"))
+    os.environ.get("LINKEDIN_SESSION_DIR", str(_GRINDHOUSE_ROOT / "linkedin-session"))
 )
 CHROME_BIN = os.environ.get(
     "LINKEDIN_CHROME_BIN", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 )
 QUERY_LIMIT = int(os.environ.get("LINKEDIN_QUERY_LIMIT", "20"))
 
+MINIO_ENDPOINT   = os.environ.get("MINIO_ENDPOINT",    "http://localhost:9000")
+MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY",  "minioadmin")
+MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY",  "minioadmin")
+MINIO_BUCKET     = os.environ.get("MINIO_BUCKET",      "warehouse")
+
+LANDING_PREFIX = "landing/linkedin"
+
 # ---------------------------------------------------------------------------
 # Iceberg helpers
 # ---------------------------------------------------------------------------
 
 
-def load_active_linkedin_queries(catalog) -> list[str]:
-    """Load active LinkedIn query strings from meta.sources.
+def load_active_linkedin_queries(catalog) -> list[dict]:
+    """Load active LinkedIn query configs from meta.sources.
+
+    Each returned dict has at minimum a ``query`` key plus optional scroll
+    tuning parameters. Defaults are applied for missing keys:
+      - scroll_steps: 6  (scroll increments per round)
+      - max_rounds:   10 (maximum scroll rounds before stopping)
+      - max_age_days: 365 (skip posts older than this many days)
 
     Args:
         catalog: Connected PyIceberg catalog.
 
     Returns:
-        List of query strings.
+        List of query config dicts.
     """
     table = patch_table_io(catalog.load_table("meta.sources"))
     from pyiceberg.expressions import And, EqualTo
@@ -86,8 +110,11 @@ def load_active_linkedin_queries(catalog) -> list[str]:
     )
     queries = []
     for config_str in scan.to_arrow().column("config").to_pylist():
-        config = json.loads(config_str)
-        queries.append(config["query"])
+        cfg = json.loads(config_str)
+        cfg.setdefault("scroll_steps", 6)
+        cfg.setdefault("max_rounds", 10)
+        cfg.setdefault("max_age_days", 365)
+        queries.append(cfg)
     return queries
 
 
@@ -150,6 +177,91 @@ def write_posts(catalog, posts: list[RawVacancy]) -> None:
         schema=arrow_schema,
     )
     table.append(arrow_table)
+
+
+# ---------------------------------------------------------------------------
+# MinIO helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_minio_client():
+    """Create a boto3 S3 client pointed at the local MinIO instance.
+
+    Returns:
+        boto3 S3 client configured from environment variables.
+    """
+    return boto3.client(
+        "s3",
+        endpoint_url=MINIO_ENDPOINT,
+        aws_access_key_id=MINIO_ACCESS_KEY,
+        aws_secret_access_key=MINIO_SECRET_KEY,
+    )
+
+
+def _save_mhtml_to_minio(mhtml_bytes: bytes, query: str, ts: datetime) -> str:
+    """Upload an MHTML snapshot to the MinIO landing zone.
+
+    Path pattern: landing/linkedin/YYYY-MM-DD/HHMMSS_{slug}.mhtml
+
+    Args:
+        mhtml_bytes: Raw MHTML content from CDP captureSnapshot.
+        query: LinkedIn search query string (used in filename slug).
+        ts: Timestamp of the snapshot (UTC).
+
+    Returns:
+        Full S3 URI of the uploaded object.
+    """
+    slug = re.sub(r"[^\w]", "_", query, flags=re.UNICODE)[:40].strip("_")
+    date_str = ts.strftime("%Y-%m-%d")
+    time_str = ts.strftime("%H%M%S")
+    key = f"{LANDING_PREFIX}/{date_str}/{time_str}_{slug}.mhtml"
+    client = _get_minio_client()
+    client.put_object(
+        Bucket=MINIO_BUCKET,
+        Key=key,
+        Body=mhtml_bytes,
+        ContentType="message/rfc822",
+        Metadata={"query": quote(query)},
+    )
+    return f"s3://{MINIO_BUCKET}/{key}"
+
+
+def _list_mhtml_from_minio(date_str: str) -> list[dict]:
+    """List MHTML landing files for a given date.
+
+    Args:
+        date_str: Date in YYYY-MM-DD format.
+
+    Returns:
+        List of dicts with keys: key (S3 key), query (from object metadata).
+    """
+    prefix = f"{LANDING_PREFIX}/{date_str}/"
+    client = _get_minio_client()
+    response = client.list_objects_v2(Bucket=MINIO_BUCKET, Prefix=prefix)
+    results = []
+    for obj in response.get("Contents", []):
+        key = obj["Key"]
+        try:
+            meta = client.head_object(Bucket=MINIO_BUCKET, Key=key)
+            query = unquote(meta.get("Metadata", {}).get("query", ""))
+        except Exception:
+            query = ""
+        results.append({"key": key, "query": query})
+    return results
+
+
+def _read_mhtml_from_minio(key: str) -> bytes:
+    """Download an MHTML file from MinIO.
+
+    Args:
+        key: S3 object key.
+
+    Returns:
+        Raw MHTML bytes.
+    """
+    client = _get_minio_client()
+    response = client.get_object(Bucket=MINIO_BUCKET, Key=key)
+    return response["Body"].read()
 
 
 # ---------------------------------------------------------------------------
@@ -271,234 +383,328 @@ def inject_cookies(driver) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scraping
+# Age parsing helpers
+# ---------------------------------------------------------------------------
+
+# Maps Russian relative-time tokens found in LinkedIn post text to timedeltas.
+# LinkedIn only exposes relative timestamps ("2 нед.", "4 мес.", "1 год") in
+# the rendered DOM — no ISO dates are available without additional requests.
+_AGE_PATTERNS: list[tuple[str, object]] = [
+    (r"(\d+)\s*мин",   lambda n: timedelta(minutes=n)),
+    (r"(\d+)\s*ч\.",   lambda n: timedelta(hours=n)),
+    (r"вчера",         lambda _: timedelta(days=1)),
+    (r"(\d+)\s*нед\.", lambda n: timedelta(weeks=n)),
+    (r"(\d+)\s*мес\.", lambda n: timedelta(days=n * 30)),
+    (r"(\d+)\s*лет",   lambda n: timedelta(days=n * 365)),
+    (r"(\d+)\s*год",   lambda n: timedelta(days=n * 365)),
+]
+
+
+def _parse_relative_age(text: str) -> timedelta | None:
+    """Parse a LinkedIn relative timestamp from post card plain text.
+
+    LinkedIn renders post age as a Russian relative time string embedded in
+    the card text after the author name and title bullet, e.g.:
+      "Кирилл Дикалин • Lead Data Engineer 2 нед. • Отслеживать"
+
+    Args:
+        text: Plain text of a post card (HTML tags already stripped).
+
+    Returns:
+        Approximate age as timedelta, or None if no pattern matched.
+    """
+    # Focus search on the first 200 chars — timestamp appears near the top
+    snippet = text[:200]
+    for pattern, to_delta in _AGE_PATTERNS:
+        m = re.search(pattern, snippet)
+        if m:
+            n = int(m.group(1)) if m.lastindex else 0
+            return to_delta(n)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# MHTML capture (fetch stage)
 # ---------------------------------------------------------------------------
 
 
-def _patch_fetch_interceptor(driver) -> None:
-    """Inject fetch interceptor to capture post URNs from LinkedIn API responses.
+def _capture_mhtml(driver) -> bytes:
+    """Capture a full-page MHTML snapshot via Chrome DevTools Protocol.
 
-    LinkedIn posts may lack direct feed URLs in the DOM. This interceptor
-    captures the URN from the feedUpdateControlMenuRequest API response,
-    which is triggered when the post's action menu is opened.
+    Uses Page.captureSnapshot which serializes the fully-rendered DOM
+    including all JavaScript-rendered content. Unlike page_source or
+    outerHTML, this captures computed text visible in the browser.
 
-    Args:
-        driver: Selenium WebDriver instance.
-    """
-    driver.execute_script("""
-        if (!window.__fetchPatched) {
-            window.__menuUrn = null;
-            const _origFetch = window.fetch;
-            window.fetch = async function(...args) {
-                const res = await _origFetch(...args);
-                const url = (typeof args[0] === 'string' ? args[0] : '');
-                if (url.includes('feedUpdateControlMenuRequest')) {
-                    const clone = res.clone();
-                    clone.text().then(text => {
-                        const m = text.match(/urn%3Ali%3A(?:share|ugcPost|activity)%3A([0-9]+)/);
-                        if (m) window.__menuUrn = 'urn:li:' + decodeURIComponent(m[0]).split(':').slice(2).join(':');
-                    });
-                }
-                return res;
-            };
-            window.__fetchPatched = true;
-        }
-    """)
-
-
-def _resolve_post_urls(driver, posts: list[RawVacancy]) -> list[RawVacancy]:
-    """Resolve surrogate ck:-prefixed post IDs to real LinkedIn feed URLs.
-
-    For posts without a direct /feed/update/ link in the DOM, clicks the
-    action menu button to trigger an API call whose response contains the
-    post URN, then builds the real URL from it.
+    On large pages Chrome occasionally fails to generate MHTML (typically
+    after many scroll rounds when the DOM is very large). In that case a
+    short pause and one retry are attempted before raising.
 
     Args:
-        driver: Selenium WebDriver instance.
-        posts: List of RawVacancy instances, some may have url starting with "ck:".
+        driver: Selenium WebDriver instance with a loaded page.
 
     Returns:
-        Same list with ck: URLs replaced by real feed URLs where possible.
+        MHTML content as UTF-8 encoded bytes.
+
+    Raises:
+        Exception: If both the initial attempt and the retry fail.
     """
-    for row in posts:
-        if not row.url.startswith("ck:"):
-            continue
-        try:
-            ck = row.url[3:]
-            driver.execute_script("window.__menuUrn = null;")
-            driver.execute_script("""
-                const ck = arguments[0];
-                const card = document.querySelector('[componentkey="' + ck + '"]');
-                if (!card) return;
-                const menuBtn = Array.from(card.querySelectorAll('button'))
-                    .find(b => (b.getAttribute('aria-label') || '').includes('меню управления'));
-                if (menuBtn) menuBtn.click();
-            """, ck)
-            time.sleep(1.2)
-            driver.execute_script(
-                "document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));"
-            )
-            urn = driver.execute_script("return window.__menuUrn || null;")
-            if urn:
-                real_url = f"https://www.linkedin.com/feed/update/{urn}/"
-                row.url = real_url
-                row.source_id = real_url
-            _human_sleep(0.5, 1.0)
-        except Exception:
-            pass
-    return posts
+    try:
+        result = driver.execute_cdp_cmd("Page.captureSnapshot", {"format": "mhtml"})
+        return result["data"].encode("utf-8")
+    except Exception as exc:
+        if "Failed to generate MHTML" not in str(exc):
+            raise
+        # DOM may be too large — wait briefly and retry once
+        time.sleep(3)
+        result = driver.execute_cdp_cmd("Page.captureSnapshot", {"format": "mhtml"})
+        return result["data"].encode("utf-8")
 
 
-def scrape_query(
+def fetch_query(
     driver,
-    catalog,
-    query: str,
+    query_cfg: dict,
     seen_ids: set[str],
-    limit: int,
-) -> int:
-    """Scrape LinkedIn search results for a query and write new posts to Bronze.
+    ts: datetime,
+) -> str | None:
+    """Navigate to a LinkedIn search page, scroll iteratively, save MHTML.
 
-    Scrolls the search results page, extracts post data via JavaScript,
-    deduplicates against seen_ids, then appends new records to Iceberg.
+    Each scroll round takes a new MHTML snapshot and checks early-stop
+    conditions before scrolling further:
+
+      1. No new cards loaded vs previous round — reached end of feed.
+      2. A card older than max_age_days found — feed is sorted by date,
+         remaining posts will only be older.
+      3. All visible cards already in Bronze (seen_ids) — nothing new to store.
+
+    The final snapshot (last round that added cards) is saved to MinIO.
 
     Args:
         driver: Selenium WebDriver instance (logged in).
-        catalog: Connected PyIceberg catalog.
-        query: LinkedIn search query string.
-        seen_ids: Set of already-stored post_ids for deduplication.
-        limit: Maximum number of new posts to collect.
+        query_cfg: Query config dict with keys: query, scroll_steps,
+            max_rounds, max_age_days.
+        seen_ids: Set of post_ids already in bronze.linkedin_posts.
+        ts: Timestamp used for the landing zone filename.
 
     Returns:
-        Number of new posts written.
+        S3 URI of the saved MHTML file, or None if skipped (all seen).
     """
+    query        = query_cfg["query"]
+    scroll_steps = query_cfg["scroll_steps"]
+    max_rounds   = query_cfg["max_rounds"]
+    max_age_days = query_cfg["max_age_days"]
+
     url = (
         "https://www.linkedin.com/search/results/content/"
         f"?keywords={quote_plus(query)}&sortBy=date_posted"
     )
     print(f"  → {url}")
     driver.get(url)
-    _human_sleep(4, 8)
+    _human_sleep(5, 9)
 
-    _patch_fetch_interceptor(driver)
+    all_cards: dict[str, dict] = {}  # post_id → card dict, accumulates across rounds
+    last_mhtml: bytes | None = None
+    stop_reason = ""
 
-    # Initial scroll to trigger lazy rendering
-    try:
-        driver.execute_script(
-            "const el = document.querySelector('main') || document.scrollingElement || document.documentElement;"
-            " el.scrollBy(0, 400);"
-        )
-    except Exception:
-        print("  [!] Window closed — LinkedIn may have blocked the session.")
-        return 0
-    _human_sleep(3, 5)
-
-    extracted_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    batch: list[RawVacancy] = []
-    total_new = 0
-    scroll_rounds = 0
-
-    while total_new < limit and scroll_rounds < 8:
-        posts_data = driver.execute_script("""
-            const results = [];
-            const cards = Array.from(document.querySelectorAll('[role="listitem"][componentkey]'));
-
-            for (const card of cards) {
-                try {
-                    const links = Array.from(card.querySelectorAll('a[href]'));
-
-                    const feedLink = links.find(a => a.href && a.href.includes('/feed/update/'));
-                    const postUrl = feedLink ? feedLink.href.split('?')[0] : '';
-                    const postId = postUrl || ('ck:' + (card.getAttribute('componentkey') || ''));
-                    if (!postId) continue;
-
-                    const profileLink = links.find(a =>
-                        a.href && a.href.includes('linkedin.com/in/') && a.innerText.trim().length > 1
-                    );
-                    const authorUrl = profileLink ? profileLink.href.split('?')[0] : '';
-                    const author = profileLink ? profileLink.innerText.trim().split('\\n')[0] : '';
-
-                    const dateEl = Array.from(card.querySelectorAll('p, div')).find(e => {
-                        const t = (e.innerText || '').trim();
-                        return t.length < 20 && (
-                            t.includes('мин') || t.includes('ч.') || t.includes('дн.') ||
-                            t.includes('нед.') || t.includes('мес.') || t.includes('год')
-                        );
-                    });
-                    const date = dateEl ? dateEl.innerText.trim() : '';
-
-                    const textEls = Array.from(card.querySelectorAll('p, span[dir="ltr"]'));
-                    const textEl = textEls.sort((a,b) => b.innerText.length - a.innerText.length)[0];
-                    const text = textEl ? textEl.innerText.trim() : card.innerText.slice(0, 1000);
-
-                    const companyLink = links.find(a => a.href && a.href.includes('linkedin.com/company/'));
-                    const company = companyLink ? companyLink.innerText.trim() : '';
-                    const companyUrl = companyLink ? companyLink.href.split('?')[0] : '';
-
-                    results.push({ author, authorUrl, company, companyUrl, date, text, postId, postUrl: postId });
-                } catch(e) {}
-            }
-
-            const seen = new Set();
-            return results.filter(r => {
-                if (seen.has(r.postId)) return false;
-                seen.add(r.postId);
-                return true;
-            });
-        """)
-
-        for p in posts_data:
-            post_id = p.get("postId", "").strip()
-            if not post_id or post_id in seen_ids:
-                continue
-            seen_ids.add(post_id)
-            text = p.get("text", "")
-            batch.append(RawVacancy(
-                source="linkedin",
-                source_id=post_id,
-                url=p.get("postUrl", post_id),
-                text=text,
-                published_at=None,
-                extracted_at=extracted_at,
-                passed_prefilter=passes_prefilter(text),
-                extra={
-                    "author":           p.get("author", ""),
-                    "author_url":       p.get("authorUrl", ""),
-                    "company":          p.get("company", ""),
-                    "company_url":      p.get("companyUrl", ""),
-                    "published_at_raw": p.get("date", ""),
-                    "query":            query,
-                },
-            ))
-            total_new += 1
-            if total_new >= limit:
+    for round_n in range(max_rounds):
+        if round_n > 0:
+            try:
+                _human_scroll(driver, steps=scroll_steps)
+            except Exception:
+                print("  [!] Scroll failed — LinkedIn may have blocked the session.")
                 break
+            _human_sleep(2, 4)
 
-        if total_new >= limit:
+        try:
+            mhtml_bytes = _capture_mhtml(driver)
+        except Exception as exc:
+            print(f"  [!] captureSnapshot failed at round {round_n}: {exc}")
+            stop_reason = "snapshot error"
             break
 
-        _human_scroll(driver, steps=random.randint(3, 5))
-        scroll_rounds += 1
-        _human_sleep(2.5, 5.0)
+        cards = _parse_mhtml(mhtml_bytes)
 
-    # Resolve surrogate ck: IDs to real feed URLs
-    batch = _resolve_post_urls(driver, batch)
+        # Track which post_ids are new in this specific round (not seen before)
+        ids_before = set(all_cards.keys())
+        for card in cards:
+            all_cards[card["post_id"]] = card
+        ids_after = set(all_cards.keys())
+        new_in_round = ids_after - ids_before
 
-    write_posts(catalog, batch)
-    print(f"  ✓ Written: {total_new} new posts")
-    return total_new
+        new_count = len(new_in_round)
+        print(f"  round {round_n}: {len(all_cards)} cards (+{new_count} new)")
+
+        last_mhtml = mhtml_bytes
+
+        # Stop: feed exhausted — DOM loaded no new cards after scroll
+        if new_count == 0 and round_n > 0:
+            stop_reason = "feed exhausted"
+            break
+
+        # Stop: hit the boundary of a previous run — a card from this round
+        # already exists in Bronze, meaning we've scrolled back to already-seen posts.
+        overlap = new_in_round & seen_ids
+        if overlap:
+            stop_reason = f"reached {len(overlap)} previously seen post(s)"
+            break
+
+        # Stop: posts older than TTL appeared in this round
+        new_cards = [all_cards[pid] for pid in new_in_round]
+        too_old = [
+            c for c in new_cards
+            if (age := _parse_relative_age(c["text"])) and age.days > max_age_days
+        ]
+        if too_old:
+            stop_reason = f"post older than {max_age_days} days found"
+            break
+
+    else:
+        stop_reason = f"reached max_rounds={max_rounds}"
+
+    print(f"  stopped: {stop_reason}")
+
+    if not all_cards:
+        print("  no cards found, skipping save")
+        return None
+
+    # Nothing new vs Bronze — no point saving MHTML
+    new_ids = {pid for pid in all_cards if pid not in seen_ids}
+    if not new_ids:
+        print("  0 new post_ids — skipping MHTML save")
+        return None
+
+    s3_uri = _save_mhtml_to_minio(last_mhtml, query, ts)
+    size_kb = len(last_mhtml) // 1024
+    print(f"  ✓ Saved {size_kb} KB → {s3_uri}")
+    return s3_uri
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# MHTML parsing (parse stage)
 # ---------------------------------------------------------------------------
 
 
-def cmd_scrape(queries: list[str]) -> None:
-    """Scrape all given queries and write new posts to Bronze.
+def _extract_cards(html_str: str) -> list[dict]:
+    """Extract post card data from a LinkedIn search results HTML string.
+
+    Finds all role="listitem" elements and extracts post URL, author,
+    company, and text from each card's HTML window.
 
     Args:
-        queries: List of LinkedIn search query strings.
+        html_str: Full HTML string from a LinkedIn search results page.
+
+    Returns:
+        List of dicts with keys: post_id, post_url, author, author_url,
+        company, company_url, text.
     """
+    cards = []
+    seen_ids: set[str] = set()
+
+    for m in re.finditer(r'<[^>]+role="listitem"[^>]*>', html_str):
+        start = m.start()
+        # Use a generous window — cards can be 4-8 KB of HTML
+        card_html = html_str[start:start + 10_000]
+
+        # Extract post feed URL
+        url_m = re.search(
+            r'href="(https://www\.linkedin\.com/feed/update/[^"?]+)', card_html
+        )
+        post_url = url_m.group(1) if url_m else ""
+
+        # Fallback ID from componentkey attribute
+        ck_m = re.search(r'componentkey="([^"]+)"', card_html)
+        ck = ck_m.group(1) if ck_m else ""
+
+        post_id = post_url or (f"ck:{ck}" if ck else "")
+        if not post_id or post_id in seen_ids:
+            continue
+        seen_ids.add(post_id)
+
+        # Author profile URL — extract from href, name from stripped card text later
+        author_m = re.search(
+            r'href="(https://www\.linkedin\.com/in/[^"?/]+(?:/[^"?]*)?)"',
+            card_html,
+        )
+        author_url = author_m.group(1).split("?")[0].rstrip("/") if author_m else ""
+        # Author name: LinkedIn renders "Публикация в ленте {Name} \u2022" in plain text.
+        # Use full card_html so no tags are truncated mid-attribute.
+        author = ""
+        card_text_plain = re.sub(r"<[^>]+>", " ", card_html)
+        card_text_plain = re.sub(r"\s+", " ", card_text_plain).strip()
+        feed_m = re.search(r"Публикация в ленте\s+(.{2,60}?)\s+\u2022", card_text_plain)
+        if feed_m:
+            author = feed_m.group(1).strip()
+
+        # Company link
+        company_m = re.search(
+            r'href="(https://www\.linkedin\.com/company/[^"?]+)[^"]*"[^>]*>\s*([^<]{2,80}?)\s*<',
+            card_html,
+        )
+        company_url = company_m.group(1) if company_m else ""
+        company = company_m.group(2).strip() if company_m else ""
+
+        # Strip all HTML tags to get plain text
+        text = re.sub(r"<[^>]+>", " ", card_html)
+        text = re.sub(r"\s+", " ", text).strip()
+
+        cards.append({
+            "post_id":     post_id,
+            "post_url":    post_url or post_id,
+            "author":      author,
+            "author_url":  author_url,
+            "company":     company,
+            "company_url": company_url,
+            "text":        text,
+        })
+
+    return cards
+
+
+def _parse_mhtml(mhtml_bytes: bytes) -> list[dict]:
+    """Parse an MHTML snapshot and extract LinkedIn post cards.
+
+    Decodes the MHTML multipart structure, finds the primary HTML part,
+    and delegates card extraction to _extract_cards.
+
+    Args:
+        mhtml_bytes: Raw MHTML content from MinIO or captureSnapshot.
+
+    Returns:
+        List of post card dicts (see _extract_cards).
+    """
+    msg = email_lib.message_from_bytes(mhtml_bytes)
+    html_part = None
+    for part in msg.walk():
+        if part.get_content_type() == "text/html":
+            payload = part.get_payload(decode=True)
+            if payload:
+                html_part = payload.decode("utf-8", errors="replace")
+                break
+    if not html_part:
+        return []
+    return _extract_cards(html_part)
+
+
+# ---------------------------------------------------------------------------
+# Stage commands
+# ---------------------------------------------------------------------------
+
+
+def cmd_fetch(queries: list[dict]) -> list[str]:
+    """Fetch MHTML snapshots for all queries and save to MinIO landing zone.
+
+    Loads seen post_ids from Bronze once upfront so each fetch_query call
+    can apply early-stop logic (skip queries where all posts already seen).
+
+    Args:
+        queries: List of query config dicts (query, scroll_steps, max_rounds,
+            max_age_days). Use load_active_linkedin_queries() to build this.
+
+    Returns:
+        List of S3 URIs for saved MHTML files (skipped queries excluded).
+    """
+    ts = datetime.now(timezone.utc).replace(tzinfo=None)
+    saved: list[str] = []
+
     catalog = get_catalog()
     seen_ids = get_seen_post_ids(catalog)
     print(f"Already in Bronze: {len(seen_ids)} posts\n")
@@ -506,11 +712,15 @@ def cmd_scrape(queries: list[str]) -> None:
     driver = make_driver()
     try:
         inject_cookies(driver)
-        total = 0
-        for i, query in enumerate(queries):
-            print(f"\n[{i + 1}/{len(queries)}] Query: «{query}»")
-            written = scrape_query(driver, catalog, query, seen_ids, QUERY_LIMIT)
-            total += written
+        for i, query_cfg in enumerate(queries):
+            query = query_cfg["query"]
+            print(f"\n[{i + 1}/{len(queries)}] Fetching: «{query}»")
+            try:
+                uri = fetch_query(driver, query_cfg, seen_ids, ts)
+                if uri:
+                    saved.append(uri)
+            except Exception as exc:
+                print(f"  [!] Failed: {exc}")
             if i < len(queries) - 1:
                 wait = random.uniform(8, 15)
                 print(f"  ⏸ Pause {wait:.0f}s...")
@@ -518,30 +728,157 @@ def cmd_scrape(queries: list[str]) -> None:
     finally:
         driver.quit()
 
-    print(f"\nDone. Total new posts written: {total}")
+    print(f"\nFetch done. {len(saved)}/{len(queries)} snapshots saved.")
+    return saved
+
+
+def cmd_parse(date_str: str | None = None) -> int:
+    """Parse MHTML landing files for a date and write posts to Bronze.
+
+    Args:
+        date_str: Date in YYYY-MM-DD format. Defaults to today (UTC).
+
+    Returns:
+        Total number of new posts written to bronze.linkedin_posts.
+    """
+    if date_str is None:
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    print(f"Parsing landing zone for date: {date_str}")
+    files = _list_mhtml_from_minio(date_str)
+    if not files:
+        print(f"  No MHTML files found under {LANDING_PREFIX}/{date_str}/")
+        return 0
+
+    print(f"  Found {len(files)} file(s)")
+    catalog = get_catalog()
+    seen_ids = get_seen_post_ids(catalog)
+    print(f"  Already in Bronze: {len(seen_ids)} posts\n")
+
+    extracted_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    total_new = 0
+
+    for f in files:
+        key = f["key"]
+        query = f["query"]
+        print(f"  Parsing: {key}")
+        try:
+            mhtml_bytes = _read_mhtml_from_minio(key)
+            cards = _parse_mhtml(mhtml_bytes)
+        except Exception as exc:
+            print(f"    [!] Failed to parse: {exc}")
+            continue
+
+        batch: list[RawVacancy] = []
+        for card in cards:
+            post_id = card["post_id"]
+            if post_id in seen_ids:
+                continue
+            seen_ids.add(post_id)
+            text = card["text"]
+            batch.append(RawVacancy(
+                source="linkedin",
+                source_id=post_id,
+                url=card["post_url"],
+                text=text,
+                published_at=None,
+                extracted_at=extracted_at,
+                passed_prefilter=passes_prefilter(text),
+                extra={
+                    "author":           card["author"],
+                    "author_url":       card["author_url"],
+                    "company":          card["company"],
+                    "company_url":      card["company_url"],
+                    "published_at_raw": "",  # not available in static MHTML
+                    "query":            query,
+                },
+            ))
+
+        write_posts(catalog, batch)
+        print(f"    ✓ Written: {len(batch)} new posts (cards found: {len(cards)})")
+        total_new += len(batch)
+
+    print(f"\nParse done. Total new posts written: {total_new}")
+    return total_new
+
+
+def cmd_scrape(queries: list[dict]) -> None:
+    """Run fetch then parse — full extraction cycle.
+
+    Args:
+        queries: List of query config dicts (see load_active_linkedin_queries).
+    """
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    print(f"Scraping {len(queries)} LinkedIn query/queries...\n")
+    cmd_fetch(queries)
+    print()
+    cmd_parse(date_str)
+
+
+def _queries_from_args(args: list[str]) -> list[dict]:
+    """Build query config dicts from CLI positional arguments.
+
+    When the user passes query strings on the command line, wrap each in a
+    minimal config dict using default scroll parameters.
+
+    Args:
+        args: Raw query strings from sys.argv.
+
+    Returns:
+        List of query config dicts with default scroll parameters.
+    """
+    return [
+        {"query": q, "scroll_steps": 6, "max_rounds": 10, "max_age_days": 365}
+        for q in args
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 
 def main() -> None:
     """CLI entry point for the LinkedIn extractor."""
     args = sys.argv[1:]
 
-    if not args or args[0] == "scrape":
+    hour = datetime.now().hour
+    if hour < 8 or hour >= 23:
+        print(f"[!] Current time {hour}:xx — outside working hours (08:00–23:00).")
+        sys.exit(0)
+
+    if not args:
+        print(__doc__)
+        sys.exit(1)
+
+    cmd = args[0]
+
+    if cmd == "fetch":
         if len(args) > 1:
-            queries = args[1:]
+            queries = _queries_from_args(args[1:])
         else:
             catalog = get_catalog()
             queries = load_active_linkedin_queries(catalog)
             if not queries:
                 print("No active LinkedIn queries in meta.sources. Run `make init` first.")
                 sys.exit(1)
+        cmd_fetch(queries)
 
-        hour = datetime.now().hour
-        if hour < 8 or hour >= 23:
-            print(f"[!] Current time {hour}:xx — outside working hours (08:00–23:00).")
-            sys.exit(0)
+    elif cmd == "parse":
+        date_str = args[1] if len(args) > 1 else None
+        cmd_parse(date_str)
 
-        print(f"Scraping {len(queries)} LinkedIn query/queries...\n")
+    elif cmd == "scrape":
+        if len(args) > 1:
+            queries = _queries_from_args(args[1:])
+        else:
+            catalog = get_catalog()
+            queries = load_active_linkedin_queries(catalog)
+            if not queries:
+                print("No active LinkedIn queries in meta.sources. Run `make init` first.")
+                sys.exit(1)
         cmd_scrape(queries)
+
     else:
         print(__doc__)
         sys.exit(1)

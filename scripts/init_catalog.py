@@ -85,6 +85,88 @@ BRONZE_HH_VACANCIES_SCHEMA = Schema(
     NestedField(20, "passed_prefilter", BooleanType(),   required=True),
 )
 
+# ---------------------------------------------------------------------------
+# Silver schemas
+# ---------------------------------------------------------------------------
+
+# Silver Telegram messages: normalized + content-hash deduped.
+# Only passed_prefilter=True rows from Bronze; earliest extracted_at per hash wins.
+SILVER_TG_MESSAGES_SCHEMA = Schema(
+    NestedField(1,  "source_id",        StringType(),    required=True),
+    NestedField(2,  "source",           StringType(),    required=True),
+    NestedField(3,  "source_channel",   StringType(),    required=True),
+    NestedField(4,  "text",             StringType(),    required=True),
+    NestedField(5,  "text_normalized",  StringType(),    required=True),
+    NestedField(6,  "content_hash",     StringType(),    required=True),
+    NestedField(7,  "published_at",     TimestampType(), required=False),
+    NestedField(8,  "extracted_at",     TimestampType(), required=True),
+    NestedField(9,  "url",              StringType(),    required=True),
+)
+
+# Silver LinkedIn posts: normalized + content-hash deduped.
+# published_at is always NULL (exact timestamps unavailable in MHTML snapshots).
+# published_at_approx is derived from published_at_raw ("2 ч.", "1 дн.", etc.)
+# by subtracting the offset from extracted_at — approximate only.
+SILVER_LINKEDIN_POSTS_SCHEMA = Schema(
+    NestedField(1,  "source_id",           StringType(),    required=True),
+    NestedField(2,  "source",              StringType(),    required=True),
+    NestedField(3,  "author",              StringType(),    required=True),
+    NestedField(4,  "author_url",          StringType(),    required=True),
+    NestedField(5,  "company",             StringType(),    required=True),
+    NestedField(6,  "company_url",         StringType(),    required=True),
+    NestedField(7,  "text",                StringType(),    required=True),
+    NestedField(8,  "text_normalized",     StringType(),    required=True),
+    NestedField(9,  "content_hash",        StringType(),    required=True),
+    NestedField(10, "published_at",        TimestampType(), required=False),
+    NestedField(11, "published_at_approx", TimestampType(), required=False),
+    NestedField(12, "extracted_at",        TimestampType(), required=True),
+    NestedField(13, "url",                 StringType(),    required=True),
+    NestedField(14, "source_query",        StringType(),    required=True),
+)
+
+# Silver HH.ru vacancies: normalized + deduped by vacancy_id then content_hash.
+# Salary fields retained as nullable — currency normalization is a Gold concern.
+SILVER_HH_VACANCIES_SCHEMA = Schema(
+    NestedField(1,  "source_id",       StringType(),    required=True),
+    NestedField(2,  "source",          StringType(),    required=True),
+    NestedField(3,  "url",             StringType(),    required=True),
+    NestedField(4,  "vacancy_name",    StringType(),    required=True),
+    NestedField(5,  "employer_id",     StringType(),    required=False),
+    NestedField(6,  "employer_name",   StringType(),    required=True),
+    NestedField(7,  "salary_from",     LongType(),      required=False),
+    NestedField(8,  "salary_to",       LongType(),      required=False),
+    NestedField(9,  "salary_currency", StringType(),    required=False),
+    NestedField(10, "salary_gross",    BooleanType(),   required=False),
+    NestedField(11, "area_id",         StringType(),    required=True),
+    NestedField(12, "area_name",       StringType(),    required=True),
+    NestedField(13, "experience",      StringType(),    required=True),
+    NestedField(14, "employment",      StringType(),    required=True),
+    NestedField(15, "schedule",        StringType(),    required=True),
+    NestedField(16, "snippet_req",     StringType(),    required=True),
+    NestedField(17, "snippet_resp",    StringType(),    required=True),
+    NestedField(18, "text",            StringType(),    required=True),
+    NestedField(19, "text_normalized", StringType(),    required=True),
+    NestedField(20, "content_hash",    StringType(),    required=True),
+    NestedField(21, "published_at",    TimestampType(), required=True),
+    NestedField(22, "extracted_at",    TimestampType(), required=True),
+    NestedField(23, "source_query",    StringType(),    required=True),
+)
+
+# Silver unified vacancies: cross-source dedup by content_hash.
+# Common column subset only — source-specific fields (salary, author) stay in
+# per-source Silver tables and are used by Gold Data Vault satellites.
+SILVER_VACANCIES_SCHEMA = Schema(
+    NestedField(1,  "source_id",           StringType(),    required=True),
+    NestedField(2,  "source",              StringType(),    required=True),
+    NestedField(3,  "url",                 StringType(),    required=True),
+    NestedField(4,  "text",                StringType(),    required=True),
+    NestedField(5,  "text_normalized",     StringType(),    required=True),
+    NestedField(6,  "content_hash",        StringType(),    required=True),
+    NestedField(7,  "published_at",        TimestampType(), required=False),
+    NestedField(8,  "published_at_approx", TimestampType(), required=False),
+    NestedField(9,  "extracted_at",        TimestampType(), required=True),
+)
+
 # Registry of all data sources. Extractors read active sources from here
 # instead of having channel lists hardcoded in scripts.
 SOURCES_SCHEMA = Schema(
@@ -110,9 +192,20 @@ _TG_CHANNELS = [
     "foranalysts",
 ]
 
+# Composite boolean queries using LinkedIn's (A OR B) "phrase" syntax.
+# Each query covers all 6 hiring signals against one role/technology target.
+# Duplicates across queries are harmless — Bronze dedup removes them by post_id.
+_SIGNALS = "(нанимаем OR ищем OR набираем OR нанимаю OR усиливаем OR приглашаем)"
 _LINKEDIN_QUERIES = [
-    '"Analytics Engineer" hiring',
-    'dbt "data engineer" hiring',
+    # Data Engineer — English and common Russian spellings
+    f'{_SIGNALS} "data engineer"',
+    f'{_SIGNALS} "инженер данных"',
+    f'{_SIGNALS} "дата инженер"',
+    # Analytics Engineer — English and hyphenated Russian
+    f'{_SIGNALS} "analytics engineer"',
+    f'{_SIGNALS} "дата-инженер"',
+    # Stack signal — dbt as a proxy for DE/AE positions
+    f'{_SIGNALS} dbt',
 ]
 
 # Initial HH.ru searches — two geography variants per query:
@@ -140,12 +233,12 @@ def _now() -> datetime:
 
 
 def init_namespaces(catalog) -> None:
-    """Create Bronze and metadata namespaces if they don't exist.
+    """Create Bronze, Silver, and metadata namespaces if they don't exist.
 
     Args:
         catalog: Connected PyIceberg catalog instance.
     """
-    for ns in [("bronze",), ("meta",)]:
+    for ns in [("bronze",), ("silver",), ("meta",)]:
         if ns not in catalog.list_namespaces():
             catalog.create_namespace(ns)
             print(f"  created namespace: {'.'.join(ns)}")
@@ -154,16 +247,23 @@ def init_namespaces(catalog) -> None:
 
 
 def init_tables(catalog) -> None:
-    """Create Bronze tables if they don't exist.
+    """Create Bronze and Silver tables if they don't exist.
 
     Args:
         catalog: Connected PyIceberg catalog instance.
     """
     tables = [
-        ("bronze.tg_messages",      BRONZE_TG_MESSAGES_SCHEMA),
-        ("bronze.linkedin_posts",   BRONZE_LINKEDIN_POSTS_SCHEMA),
-        ("bronze.hh_vacancies",     BRONZE_HH_VACANCIES_SCHEMA),
-        ("meta.sources",            SOURCES_SCHEMA),
+        # Bronze — raw data from extractors, no transformations
+        ("bronze.tg_messages",        BRONZE_TG_MESSAGES_SCHEMA),
+        ("bronze.linkedin_posts",     BRONZE_LINKEDIN_POSTS_SCHEMA),
+        ("bronze.hh_vacancies",       BRONZE_HH_VACANCIES_SCHEMA),
+        # Silver — normalized + content-hash deduped (written by SQLMesh/Spark)
+        ("silver.tg_messages",        SILVER_TG_MESSAGES_SCHEMA),
+        ("silver.linkedin_posts",     SILVER_LINKEDIN_POSTS_SCHEMA),
+        ("silver.hh_vacancies",       SILVER_HH_VACANCIES_SCHEMA),
+        ("silver.vacancies",          SILVER_VACANCIES_SCHEMA),
+        # Metadata — source registry
+        ("meta.sources",              SOURCES_SCHEMA),
     ]
     for identifier, schema in tables:
         try:
@@ -264,8 +364,36 @@ def seed_sources(catalog) -> None:
         print(f"  seeded {tg_count} TG sources, {li_count} LinkedIn sources, {hh_count} HH sources")
 
 
+def reset_linkedin_sources(catalog) -> None:
+    """Drop and recreate meta.sources, then re-seed with current _LINKEDIN_QUERIES.
+
+    Use this when _LINKEDIN_QUERIES has changed and the old source_ids in
+    meta.sources are stale. PyIceberg does not support UPDATE/DELETE, so the
+    only way to remove obsolete rows is to drop and recreate the table.
+
+    All non-LinkedIn sources (TG, HH) are re-seeded automatically because
+    seed_sources() is idempotent — it skips source_ids already present.
+
+    Args:
+        catalog: Connected PyIceberg catalog instance.
+    """
+    print("Dropping meta.sources...")
+    catalog.drop_table("meta.sources")
+    catalog.create_table("meta.sources", schema=SOURCES_SCHEMA)
+    print("  recreated meta.sources")
+    seed_sources(catalog)
+
+
 def main() -> None:
-    """Run full catalog initialization: namespaces → tables → seed data."""
+    """Run full catalog initialization: namespaces → tables → seed data.
+
+    Flags:
+        --reset-linkedin: Drop and recreate meta.sources to replace stale
+            LinkedIn source_ids after _LINKEDIN_QUERIES has changed.
+    """
+    import sys
+    reset_linkedin = "--reset-linkedin" in sys.argv
+
     print("Initializing Iceberg catalog...\n")
 
     catalog = get_catalog()
@@ -277,7 +405,11 @@ def main() -> None:
     init_tables(catalog)
 
     print("\n[Sources]")
-    seed_sources(catalog)
+    if reset_linkedin:
+        print("  --reset-linkedin: dropping and recreating meta.sources")
+        reset_linkedin_sources(catalog)
+    else:
+        seed_sources(catalog)
 
     print("\nDone.")
 

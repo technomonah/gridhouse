@@ -23,6 +23,9 @@ KEYWORDS: frozenset[str] = frozenset({
     "data platform", "data infrastructure", "pipeline",
     "аналитик данных", "инженер данных", "аналитический инженер",
     "хранилище данных",
+    # Hiring signal words — LinkedIn Russian posts
+    "нанимаем", "нанимаю", "нанимаемся", "набираем",
+    "ищем", "открыта вакансия", "усиливаем", "приглашаем",
 })
 
 
