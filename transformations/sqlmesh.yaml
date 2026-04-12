@@ -1,0 +1,33 @@
+# SQLMesh project configuration for grindhouse Silver layer.
+#
+# Gateway: local Spark session built by transformations/config.py.
+# SQLMesh picks up the active SparkSession from the running Python process —
+# run.py calls get_spark() before importing sqlmesh.Context.
+#
+# State store: SQLite file at .sqlmesh/state.db — lightweight for portfolio use,
+# tracks model versions, snapshots, and environment state across runs.
+#
+# Dialect: spark — SQLMesh validates and renders SQL in Spark SQL syntax.
+
+gateways:
+  local:
+    connection:
+      type: spark
+      # SparkSession is created externally in run.py before Context is instantiated.
+      # No additional config needed here — SQLMesh uses SparkSession.getActiveSession().
+    state_connection:
+      # Spark cannot store SQLMesh state (snapshots, environments, model versions).
+      # DuckDB is used as a lightweight state backend — stored in /tmp/sqlmesh_state.db.
+      # /tmp is writable by all users inside the apache/spark-py container.
+      type: duckdb
+      database: /tmp/sqlmesh_state.db
+
+model_defaults:
+  # FULL refresh: re-computes entire Silver tables on each run.
+  # Acceptable at current scale (thousands of rows). Switch to INCREMENTAL_BY_TIME_RANGE
+  # in Phase 4 when Gold satellites need time-partitioned processing.
+  kind: FULL
+  dialect: spark
+  table_format: iceberg
+
+default_gateway: local

@@ -86,11 +86,62 @@ services:
     networks:
       - lakehouse
 
+  spark:
+    # Apache Spark in local mode — executes SQLMesh Silver transformations.
+    # Container stays alive via tail -f /dev/null; jobs run via docker exec.
+    # Spark UI available at http://localhost:4040 during active job execution.
+    # Using apache/spark-py:latest (Spark 3.4.x) — bitnami/spark:3.5 not available on Docker Hub.
+    image: apache/spark-py:latest
+    container_name: grindhouse-spark
+    depends_on:
+      nessie:
+        condition: service_healthy
+    ports:
+      - "4040:4040"   # Spark UI (active only during job execution)
+    environment:
+      # S3A connector credentials — same MinIO creds used by extractors
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      # Nessie + warehouse config passed through to SparkSession builder in config.py
+      NESSIE_URI: "http://nessie:19120/iceberg/"
+      ICEBERG_WAREHOUSE: "s3://warehouse"
+      # Docker-internal S3 endpoint — Spark runs inside the lakehouse network
+      S3_ENDPOINT: "http://minio:9000"
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      # PySpark is bundled under /opt/spark/python — not installed as a system package.
+      # /spark-deps is a named volume — persists pip-installed packages across restarts.
+      PYTHONPATH: "/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.7-src.zip:/spark-deps"
+      # Redirect Ivy2 Maven cache to /tmp — /opt/spark/.ivy2 is not writable by this user.
+      JAVA_TOOL_OPTIONS: "-Divy.default.ivy.user.dir=/tmp/.ivy2"
+      # SQLMesh stores state and analytics in ~/.sqlmesh — redirect to /tmp.
+      SQLMESH_HOME: "/tmp/.sqlmesh"
+    volumes:
+      # Mount transformations/ so SQLMesh models and spark_session.py are available inside
+      - ./transformations:/opt/spark/transformations
+      # Pre-downloaded JARs — avoids Ivy2 Maven resolver permission issues at runtime
+      - ./jars:/opt/spark/jars-extra
+      # Named volume for pip-installed Python packages — persists across container restarts
+      - spark-deps:/spark-deps
+    # Install Python dependencies on startup, then keep container alive.
+    # /spark-deps is a named volume — pip installs only if sqlmesh is not yet present.
+    # duckdb is needed as SQLMesh state backend (Spark cannot store SQLMesh state).
+    command: >
+      /bin/bash -c "
+        python3 -c 'import sqlmesh' 2>/dev/null ||
+        pip3 install 'sqlmesh>=0.120' 'duckdb>=0.10' --target /spark-deps --quiet &&
+        tail -f /dev/null
+      "
+    networks:
+      - lakehouse
+
 volumes:
   # Persists MinIO object storage data (Parquet files) across container restarts
   minio-data:
   # Persists Nessie RocksDB metadata across container restarts
   nessie-data:
+  # Persists pip-installed Python packages for Spark container across restarts
+  spark-deps:
 
 networks:
   lakehouse:

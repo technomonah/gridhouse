@@ -1,0 +1,15 @@
+# External source declarations for Bronze Iceberg tables.
+#
+# These tables are written by PyIceberg extractors (not by SQLMesh) — declaring
+# them as external sources allows SQLMesh to track lineage from Bronze → Silver
+# without attempting to manage Bronze table lifecycle itself.
+
+sources:
+  - name: nessie.bronze.tg_messages
+    description: "Raw Telegram messages — written by extractors/tg.py"
+
+  - name: nessie.bronze.linkedin_posts
+    description: "Raw LinkedIn hiring posts — written by extractors/linkedin.py"
+
+  - name: nessie.bronze.hh_vacancies
+    description: "Raw HH.ru vacancies — written by extractors/hh.py"

@@ -11,10 +11,12 @@ dependencies = [
     "requests>=2.31",
     # Iceberg
     "pyiceberg[s3,nessie]>=0.7",
+    # Transformations — Spark + SQLMesh (Phase 3)
+    # pyspark version must match apache/spark-py:latest image (currently Spark 3.4.x)
+    "pyspark>=3.4,<3.5",
+    "sqlmesh[spark]>=0.120",
     # AI scoring
     "anthropic>=0.30",
-    # Orchestration
-    "apache-airflow>=2.9",
     # Utils
     "rich>=13.0",
     "python-dotenv>=1.0",
@@ -23,6 +25,14 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "ruff>=0.4",
+    # Unit tests for dedup logic — DuckDB runs in-process, no JVM required
+    "pytest>=8.0",
+    "duckdb>=0.10",
+]
+
+# Airflow added in Phase 5 only — massive dependency tree, keep out of base env
+airflow = [
+    "apache-airflow>=2.9",
 ]
 
 [tool.ruff]

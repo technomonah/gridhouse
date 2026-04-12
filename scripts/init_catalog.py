@@ -247,7 +247,11 @@ def init_namespaces(catalog) -> None:
 
 
 def init_tables(catalog) -> None:
-    """Create Bronze and Silver tables if they don't exist.
+    """Create Bronze tables if they don't exist.
+
+    Silver tables are managed by SQLMesh/Spark — do NOT pre-create them here.
+    SQLMesh writes to sqlmesh__silver.* and creates silver.* as views pointing
+    to those tables. Pre-creating silver.* as Iceberg tables blocks SQLMesh.
 
     Args:
         catalog: Connected PyIceberg catalog instance.
@@ -257,11 +261,6 @@ def init_tables(catalog) -> None:
         ("bronze.tg_messages",        BRONZE_TG_MESSAGES_SCHEMA),
         ("bronze.linkedin_posts",     BRONZE_LINKEDIN_POSTS_SCHEMA),
         ("bronze.hh_vacancies",       BRONZE_HH_VACANCIES_SCHEMA),
-        # Silver — normalized + content-hash deduped (written by SQLMesh/Spark)
-        ("silver.tg_messages",        SILVER_TG_MESSAGES_SCHEMA),
-        ("silver.linkedin_posts",     SILVER_LINKEDIN_POSTS_SCHEMA),
-        ("silver.hh_vacancies",       SILVER_HH_VACANCIES_SCHEMA),
-        ("silver.vacancies",          SILVER_VACANCIES_SCHEMA),
         # Metadata — source registry
         ("meta.sources",              SOURCES_SCHEMA),
     ]

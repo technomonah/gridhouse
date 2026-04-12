@@ -23,3 +23,10 @@ linkedin-cookies.json
 # IDE
 .idea/
 .vscode/
+
+# Spark JARs — pre-downloaded binaries, not tracked in git
+# See jars/README.md for download instructions
+jars/*.jar
+
+# SQLMesh cache — generated at runtime
+transformations/.cache/
