@@ -92,6 +92,10 @@ purge-failed:
 export:
 	python3 scripts/export_vacancies.py
 
+# Sync HR interaction events from hire/vacancy/*.md to Gold Data Vault tables
+sync-hr:
+	python3 scripts/sync_hr_events.py
+
 # Check code style with ruff
 lint:
 	ruff check .

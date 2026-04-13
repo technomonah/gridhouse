@@ -397,6 +397,21 @@ def main() -> None:
     vacancies = load_export_data(catalog)
     print(f"Found {len(vacancies)} vacancies to export (apply/priority_apply)")
 
+    # Build a set of normalized HH vacancy IDs already present on disk.
+    # This prevents creating hh.ru duplicates when the same vacancy exists
+    # under an hh.kz / almaty.hh.kz URL in a previously exported file.
+    existing_hh_ids: set[str] = set()
+    for md in vacancy_dir.glob("*.md"):
+        try:
+            text = md.read_text(encoding="utf-8")
+            m = re.search(r"^link:\s*(.+)$", text, re.MULTILINE)
+            if m:
+                hh_m = re.search(r"hh\.[a-z]+(/vacancy/\d+)", m.group(1))
+                if hh_m:
+                    existing_hh_ids.add(hh_m.group(1))
+        except OSError:
+            continue
+
     created = 0
     skipped = 0
     for vac in vacancies:
@@ -405,7 +420,15 @@ def main() -> None:
         filename = make_filename(employer, role, vac.get("hub_vacancy_hk", ""))
         out_path = vacancy_dir / filename
 
+        # Check by filename first (fast path)
         if out_path.exists():
+            skipped += 1
+            continue
+
+        # Check by normalized HH vacancy ID to avoid hh.ru vs hh.kz duplicates
+        url = vac.get("url") or ""
+        hh_m = re.search(r"hh\.[a-z]+(/vacancy/\d+)", url)
+        if hh_m and hh_m.group(1) in existing_hh_ids:
             skipped += 1
             continue
 
@@ -417,6 +440,10 @@ def main() -> None:
             continue
 
         out_path.write_text(content, encoding="utf-8")
+        # Track the new file's HH ID so subsequent vacancies in this run
+        # don't create a duplicate either
+        if hh_m:
+            existing_hh_ids.add(hh_m.group(1))
         print(f"  created: {filename}")
         created += 1
 

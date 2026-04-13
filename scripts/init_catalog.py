@@ -168,6 +168,42 @@ SILVER_VACANCIES_SCHEMA = Schema(
     NestedField(9,  "extracted_at",        TimestampType(), required=True),
 )
 
+# Gold Data Vault tables for HR interaction tracking.
+# Written by scripts/sync_hr_events.py — NOT managed by dbt.
+#
+# hub_hr_interaction: one row per unique interaction event (applied, viewed, etc.)
+# link_interaction_vacancy: ties each interaction to a vacancy in the pipeline
+# sat_interaction_details: descriptive attributes of the interaction
+#
+# Business key for hub: MD5(vacancy_url || status || updated_date)
+# resume_version is derived from the `cv:` frontmatter field slug.
+GOLD_HUB_HR_INTERACTION_SCHEMA = Schema(
+    NestedField(1, "hub_hr_interaction_hk", StringType(),    required=True),
+    NestedField(2, "event_id_bk",           StringType(),    required=True),
+    NestedField(3, "load_dts",              TimestampType(), required=True),
+    NestedField(4, "rec_src",               StringType(),    required=True),
+)
+
+GOLD_LINK_INTERACTION_VACANCY_SCHEMA = Schema(
+    NestedField(1, "link_hk",                  StringType(),    required=True),
+    NestedField(2, "hub_hr_interaction_hk",    StringType(),    required=True),
+    NestedField(3, "hub_vacancy_hk",           StringType(),    required=False),
+    NestedField(4, "vacancy_url",              StringType(),    required=True),
+    NestedField(5, "load_dts",                 TimestampType(), required=True),
+    NestedField(6, "rec_src",                  StringType(),    required=True),
+)
+
+GOLD_SAT_INTERACTION_DETAILS_SCHEMA = Schema(
+    NestedField(1, "hub_hr_interaction_hk", StringType(),    required=True),
+    NestedField(2, "load_dts",              TimestampType(), required=True),
+    NestedField(3, "rec_src",               StringType(),    required=True),
+    NestedField(4, "hash_diff",             StringType(),    required=True),
+    NestedField(5, "event_type",            StringType(),    required=True),
+    NestedField(6, "resume_version",        StringType(),    required=False),
+    NestedField(7, "occurred_at",           TimestampType(), required=True),
+    NestedField(8, "notes",                 StringType(),    required=False),
+)
+
 # Gold sat_vacancy_score: AI scoring results written by scripts/score_vacancies.py.
 # This table is NOT managed by SQLMesh — pre-created here so score_vacancies.py
 # can append to it without needing to create the table on first run.
@@ -279,10 +315,14 @@ def init_tables(catalog) -> None:
         ("bronze.hh_vacancies",       BRONZE_HH_VACANCIES_SCHEMA),
         # Metadata — source registry
         ("meta.sources",              SOURCES_SCHEMA),
-        # Gold — AI scoring results (written by scripts/score_vacancies.py, not SQLMesh)
-        # Gold SQLMesh-managed tables (hubs, links, satellites) are NOT pre-created here —
-        # SQLMesh creates sqlmesh__gold.* and gold.* views on first make transform.
-        ("gold.sat_vacancy_score",    GOLD_SAT_VACANCY_SCORE_SCHEMA),
+        # Gold — AI scoring results (written by scripts/score_vacancies.py, not dbt)
+        # dbt-managed tables (hubs, links, satellites) are NOT pre-created here —
+        # dbt creates them directly in nessie.gold.* on first make transform.
+        ("gold.sat_vacancy_score",           GOLD_SAT_VACANCY_SCORE_SCHEMA),
+        # Gold — HR interaction tracking (written by scripts/sync_hr_events.py, not dbt)
+        ("gold.hub_hr_interaction",          GOLD_HUB_HR_INTERACTION_SCHEMA),
+        ("gold.link_interaction_vacancy",    GOLD_LINK_INTERACTION_VACANCY_SCHEMA),
+        ("gold.sat_interaction_details",     GOLD_SAT_INTERACTION_DETAILS_SCHEMA),
     ]
     for identifier, schema in tables:
         try:
