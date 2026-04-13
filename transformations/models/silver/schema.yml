@@ -1,0 +1,112 @@
+version: 2
+
+models:
+  - name: tg_messages
+    description: >
+      Silver: deduplicated Telegram messages from job-hunting channels.
+      One row per unique message (by content_hash). Rows without a vacancy keyword
+      are already excluded at extraction time via the Bronze prefilter.
+    columns:
+      - name: content_hash
+        description: MD5 of lowercased, trimmed message text. Primary dedup key.
+        tests:
+          - not_null
+          - unique
+      - name: source_channel
+        description: Telegram channel username (without @).
+      - name: message_text
+        description: Original message text.
+      - name: extracted_at
+        description: When the extractor wrote this row to Bronze.
+
+  - name: linkedin_posts
+    description: >
+      Silver: deduplicated LinkedIn hiring posts.
+      One row per unique post (by content_hash).
+    columns:
+      - name: content_hash
+        description: MD5 of lowercased, trimmed post text. Primary dedup key.
+        tests:
+          - not_null
+          - unique
+      - name: author
+        description: Post author display name (nullable — anonymous posts allowed).
+      - name: company
+        description: Company name from the post (nullable).
+      - name: extracted_at
+        description: When the extractor wrote this row to Bronze.
+
+  - name: hh_vacancies
+    description: >
+      Silver: normalized and deduplicated HH.ru vacancies.
+      Two-stage dedup: first by vacancy_id (same vacancy from multiple search queries),
+      then by content_hash (different IDs, identical text — edge case).
+    columns:
+      - name: content_hash
+        description: MD5 of normalized vacancy text (title + requirements + responsibilities).
+        tests:
+          - not_null
+          - unique
+      - name: source_id
+        description: HH.ru vacancy_id. Nullable after dedup edge cases.
+      - name: vacancy_name
+        description: Vacancy title as provided by HH.
+      - name: employer_name
+        description: Employer display name (nullable — anonymous postings allowed).
+      - name: employer_id
+        description: HH employer ID (nullable — anonymous postings).
+      - name: salary_from
+        description: Lower salary bound. Nullable.
+      - name: salary_to
+        description: Upper salary bound. Nullable.
+      - name: salary_currency
+        description: ISO currency code (RUB, USD, KZT, etc.). Nullable.
+      - name: salary_gross
+        description: True if salary is gross (before tax). Nullable.
+      - name: area_id
+        description: HH area ID. Nullable.
+      - name: area_name
+        description: City / region name. Nullable.
+      - name: experience
+        description: Experience requirement bucket (e.g. "between3And6"). Nullable.
+      - name: employment
+        description: Employment type (full, part, etc.). Nullable.
+      - name: schedule
+        description: Work schedule (remote, office, etc.). Nullable.
+      - name: published_at
+        description: Vacancy publication timestamp on HH.
+      - name: extracted_at
+        description: When the extractor wrote this row to Bronze.
+
+  - name: vacancies
+    description: >
+      Silver: unified cross-source vacancy table. One row per unique vacancy
+      (by content_hash across all sources: hh, linkedin, telegram).
+      This is the primary spine for all Gold models.
+    columns:
+      - name: content_hash
+        description: Source-specific MD5 dedup key.
+        tests:
+          - not_null
+          - unique
+      - name: source
+        description: Source system identifier. One of 'hh', 'linkedin', 'telegram'.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['hh', 'linkedin', 'telegram']
+      - name: url
+        description: Canonical vacancy URL. Nullable for Telegram posts.
+      - name: text
+        description: Original vacancy text.
+      - name: text_normalized
+        description: Lowercased, trimmed vacancy text — used for content_hash.
+      - name: published_at
+        description: Exact publish timestamp. Nullable when not available.
+      - name: published_at_approx
+        description: Approximate publish date derived from message metadata. Nullable.
+      - name: extracted_at
+        description: When the extractor first observed this vacancy.
+        tests:
+          - not_null

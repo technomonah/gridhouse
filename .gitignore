@@ -28,5 +28,16 @@ linkedin-cookies.json
 # See jars/README.md for download instructions
 jars/*.jar
 
-# SQLMesh cache — generated at runtime
+# SQLMesh cache — generated at runtime (removed in dbt migration)
 transformations/.cache/
+
+# dbt — generated at runtime
+transformations/target/
+transformations/.user.yml
+transformations/logs/
+
+# Spark Python deps bind mount — installed at container startup
+spark-deps/
+
+# Jupyter notebook outputs — keep .ipynb files but ignore checkpoints
+notebooks/.ipynb_checkpoints/

@@ -7,15 +7,6 @@
 --
 -- Validate actual values before changing regex:
 --   SELECT DISTINCT published_at_raw FROM nessie.bronze.linkedin_posts LIMIT 30
---
--- Output written to nessie.silver.linkedin_posts (Iceberg via Nessie).
-
-MODEL (
-  name nessie.silver.linkedin_posts,
-  kind FULL,
-  dialect spark,
-  table_format iceberg
-);
 
 WITH filtered AS (
   -- Keep only prefiltered rows with non-empty text.
@@ -32,7 +23,7 @@ WITH filtered AS (
     published_at_raw,
     extracted_at,
     query
-  FROM nessie.bronze.linkedin_posts
+  FROM {{ source('bronze', 'linkedin_posts') }}
   WHERE passed_prefilter = true
     AND text IS NOT NULL
     AND TRIM(text) != ''

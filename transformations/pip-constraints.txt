@@ -1,0 +1,5 @@
+# Constraints for dbt-spark installation inside the Spark container.
+# pyspark is already bundled under /opt/spark/python in apache/spark-py:latest
+# (Spark 3.4.x). Pin to the bundled version to prevent pip from downloading
+# and re-installing pyspark as a dbt-spark dependency.
+pyspark==3.4.0

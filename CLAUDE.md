@@ -7,7 +7,7 @@ AI scoring, and auto-applying via HH API.
 
 ## Stack
 
-MinIO + Apache Iceberg + Nessie + Apache Spark + SQLMesh + Trino + Airflow + Anthropic SDK
+MinIO + Apache Iceberg + Nessie + Apache Spark + dbt-spark + Airflow + Anthropic SDK
 
 ## Architecture
 

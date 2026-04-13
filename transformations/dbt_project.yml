@@ -1,0 +1,32 @@
+name: grindhouse
+version: '1.0.0'
+config-version: 2
+
+# Profile defined in profiles.yml — uses SparkSession (method: session).
+profile: grindhouse_spark
+
+model-paths: ["models"]
+test-paths: ["tests"]
+analysis-paths: ["analyses"]
+macro-paths: ["macros"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+
+clean-targets: ["/tmp/dbt_target"]
+
+models:
+  grindhouse:
+    # All models: Iceberg tables, full refresh by default.
+    # Individual models can override with {{ config(materialized='incremental') }}.
+    +materialized: table
+    +file_format: iceberg
+
+    silver:
+      # Silver namespace in Nessie catalog.
+      # dbt-spark with method=session writes to: <catalog>.<schema>.<model>
+      # catalog = nessie (set in profiles.yml), schema = silver → nessie.silver.*
+      +schema: silver
+
+    gold:
+      # Gold namespace — Data Vault 2.0 models (hubs, links, SAL, satellites).
+      +schema: gold

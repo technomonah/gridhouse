@@ -101,5 +101,9 @@ def get_spark(app_name: str = "grindhouse") -> SparkSession:
         )
         # Pre-downloaded JARs — avoids Ivy2 Maven resolver permission issues at runtime.
         .config("spark.jars", _SPARK_JARS)
+        # Set nessie as the default catalog so dbt-spark references resolve as
+        # nessie.<schema>.<model> instead of spark_catalog.<schema>.<model>.
+        # With this setting, dbt +schema: silver → nessie.silver.<model>.
+        .config("spark.sql.defaultCatalog", "nessie")
         .getOrCreate()
     )

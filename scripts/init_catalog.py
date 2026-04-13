@@ -18,6 +18,7 @@ import pyarrow as pa
 from pyiceberg.schema import Schema
 from pyiceberg.types import (
     BooleanType,
+    DoubleType,
     LongType,
     NestedField,
     StringType,
@@ -167,6 +168,21 @@ SILVER_VACANCIES_SCHEMA = Schema(
     NestedField(9,  "extracted_at",        TimestampType(), required=True),
 )
 
+# Gold sat_vacancy_score: AI scoring results written by scripts/score_vacancies.py.
+# This table is NOT managed by SQLMesh — pre-created here so score_vacancies.py
+# can append to it without needing to create the table on first run.
+GOLD_SAT_VACANCY_SCORE_SCHEMA = Schema(
+    NestedField(1, "hub_vacancy_hk",     StringType(),    required=True),
+    NestedField(2, "load_dts",           TimestampType(), required=True),
+    NestedField(3, "rec_src",            StringType(),    required=True),
+    NestedField(4, "hash_diff",          StringType(),    required=True),
+    NestedField(5, "score",              DoubleType(),    required=False),
+    NestedField(6, "reasoning",          StringType(),    required=False),
+    NestedField(7, "recommended_action", StringType(),    required=False),
+    NestedField(8, "model_version",      StringType(),    required=False),
+    NestedField(9, "scored_at",          TimestampType(), required=False),
+)
+
 # Registry of all data sources. Extractors read active sources from here
 # instead of having channel lists hardcoded in scripts.
 SOURCES_SCHEMA = Schema(
@@ -238,7 +254,7 @@ def init_namespaces(catalog) -> None:
     Args:
         catalog: Connected PyIceberg catalog instance.
     """
-    for ns in [("bronze",), ("silver",), ("meta",)]:
+    for ns in [("bronze",), ("silver",), ("meta",), ("gold",)]:
         if ns not in catalog.list_namespaces():
             catalog.create_namespace(ns)
             print(f"  created namespace: {'.'.join(ns)}")
@@ -263,6 +279,10 @@ def init_tables(catalog) -> None:
         ("bronze.hh_vacancies",       BRONZE_HH_VACANCIES_SCHEMA),
         # Metadata — source registry
         ("meta.sources",              SOURCES_SCHEMA),
+        # Gold — AI scoring results (written by scripts/score_vacancies.py, not SQLMesh)
+        # Gold SQLMesh-managed tables (hubs, links, satellites) are NOT pre-created here —
+        # SQLMesh creates sqlmesh__gold.* and gold.* views on first make transform.
+        ("gold.sat_vacancy_score",    GOLD_SAT_VACANCY_SCORE_SCHEMA),
     ]
     for identifier, schema in tables:
         try:

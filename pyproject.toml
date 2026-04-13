@@ -11,10 +11,12 @@ dependencies = [
     "requests>=2.31",
     # Iceberg
     "pyiceberg[s3,nessie]>=0.7",
-    # Transformations — Spark + SQLMesh (Phase 3)
+    # Transformations — Spark + dbt (Phase 4)
     # pyspark version must match apache/spark-py:latest image (currently Spark 3.4.x)
+    # dbt runs inside the Spark container — install via pip inside container, not here
     "pyspark>=3.4,<3.5",
-    "sqlmesh[spark]>=0.120",
+    "dbt-core>=1.8",
+    "dbt-spark[session]>=1.8",
     # AI scoring
     "anthropic>=0.30",
     # Utils

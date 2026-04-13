@@ -1,0 +1,187 @@
+version: 2
+
+models:
+  - name: hub_vacancy
+    description: >
+      Data Vault 2.0 Hub: unique vacancies identified by content_hash business key.
+      One row per unique vacancy across all sources.
+    columns:
+      - name: hub_vacancy_hk
+        description: MD5 surrogate key derived from content_hash.
+        tests:
+          - not_null
+          - unique
+      - name: content_hash_bk
+        description: Business key — MD5 of normalized vacancy text.
+        tests:
+          - not_null
+      - name: load_dts
+        description: Timestamp when this vacancy was first loaded (extracted_at from Silver).
+      - name: rec_src
+        description: Record source identifier. Always 'silver.vacancies'.
+
+  - name: hub_company
+    description: >
+      Data Vault 2.0 Hub: unique companies identified by normalized employer name.
+      Populated from HH and LinkedIn sources only (TG posts lack structured company data).
+    columns:
+      - name: hub_company_hk
+        description: MD5 surrogate key derived from company_name_bk.
+        tests:
+          - not_null
+          - unique
+      - name: company_name_bk
+        description: Business key — UPPER(TRIM(employer_name)).
+        tests:
+          - not_null
+      - name: load_dts
+        description: Timestamp when this company was first observed.
+      - name: rec_src
+        description: Record source identifier.
+
+  - name: hub_contact
+    description: >
+      Data Vault 2.0 Hub: unique hiring contacts identified by normalized author name.
+      Populated from LinkedIn posts only — TG and HH lack named contact data.
+      Currently yields 0 rows (LinkedIn Silver is empty at Phase 3 completion).
+    columns:
+      - name: hub_contact_hk
+        description: MD5 surrogate key derived from contact_name_bk.
+        tests:
+          - not_null
+          - unique
+      - name: contact_name_bk
+        description: Business key — UPPER(TRIM(linkedin_author)).
+        tests:
+          - not_null
+      - name: load_dts
+        description: Timestamp when this contact was first observed.
+      - name: rec_src
+        description: Record source identifier. Always 'silver.linkedin_posts'.
+
+  - name: link_vacancy_company
+    description: >
+      Data Vault 2.0 Link: vacancy ↔ company relationship.
+      Joins hub_vacancy to hub_company. One row per unique (vacancy, company) pair.
+    columns:
+      - name: link_hk
+        description: MD5 surrogate key derived from content_hash + company_name_bk.
+        tests:
+          - not_null
+          - unique
+      - name: hub_vacancy_hk
+        description: FK to hub_vacancy.
+        tests:
+          - not_null
+      - name: hub_company_hk
+        description: FK to hub_company.
+        tests:
+          - not_null
+
+  - name: link_vacancy_contact
+    description: >
+      Data Vault 2.0 Link: vacancy ↔ contact relationship.
+      Links hub_vacancy to hub_contact through LinkedIn post authorship.
+      Currently yields 0 rows (LinkedIn Silver is empty at Phase 3 completion).
+    columns:
+      - name: link_hk
+        description: MD5 surrogate key.
+        tests:
+          - not_null
+          - unique
+      - name: hub_vacancy_hk
+        description: FK to hub_vacancy.
+      - name: hub_contact_hk
+        description: FK to hub_contact.
+
+  - name: sal_vacancy
+    description: >
+      Data Vault 2.0 Same-As Link: cross-source vacancy deduplication.
+      Identifies the same real-world vacancy appearing in multiple sources.
+      Uses blocking strategy: same company name + published within 7 days + different source.
+      Currently yields 0 rows (TG and LinkedIn Silver are empty at Phase 3 completion).
+    columns:
+      - name: sal_hk
+        description: MD5 surrogate key derived from both hub_vacancy_hk values.
+        tests:
+          - not_null
+          - unique
+      - name: hub_vacancy_hk_1
+        description: FK to hub_vacancy (alphabetically first).
+      - name: hub_vacancy_hk_2
+        description: FK to hub_vacancy (alphabetically second).
+      - name: similarity_method
+        description: Detection method identifier. Always 'company_date_block'.
+
+  - name: sat_vacancy_details
+    description: >
+      Data Vault 2.0 Satellite: vacancy canonical text fields.
+      Attached to hub_vacancy. Stores url, text, published_at from silver.vacancies.
+    columns:
+      - name: hub_vacancy_hk
+        description: FK to hub_vacancy.
+        tests:
+          - not_null
+      - name: load_dts
+        description: Timestamp when this version was first observed in Silver.
+      - name: hash_diff
+        description: MD5 of all descriptive attributes — change detection for incremental.
+        tests:
+          - not_null
+      - name: source
+        description: Source system identifier (hh, linkedin, telegram).
+      - name: url
+        description: Canonical vacancy URL.
+      - name: text
+        description: Original vacancy text.
+      - name: text_normalized
+        description: Lowercased, trimmed vacancy text.
+      - name: published_at
+        description: Exact publish timestamp. Nullable.
+      - name: published_at_approx
+        description: Approximate publish date. Nullable.
+
+  - name: sat_vacancy_source
+    description: >
+      Data Vault 2.0 Satellite: per-source vacancy metadata.
+      Single unified satellite with nullable source-specific columns.
+      HH fields: salary_from/to/currency/gross, area_name, experience, employment, schedule.
+      LinkedIn fields: contact_author, contact_company, contact_company_url, contact_author_url.
+      TG fields: tg_channel.
+    columns:
+      - name: hub_vacancy_hk
+        description: FK to hub_vacancy.
+        tests:
+          - not_null
+      - name: load_dts
+        description: When this record was loaded.
+      - name: hash_diff
+        description: MD5 of all source-specific attributes — change detection.
+        tests:
+          - not_null
+      - name: source
+        description: Source system (hh, linkedin, telegram).
+
+  - name: sat_company_details
+    description: >
+      Data Vault 2.0 Satellite: company descriptive metadata.
+      Attached to hub_company. Populated from silver.hh_vacancies only.
+      One row per company_name_bk — earliest extracted_at wins.
+      employer_id is nullable (HH allows anonymous postings).
+    columns:
+      - name: hub_company_hk
+        description: FK to hub_company.
+        tests:
+          - not_null
+      - name: load_dts
+        description: Earliest extracted_at for this company.
+      - name: hash_diff
+        description: MD5 of employer_id + area_id + area_name.
+        tests:
+          - not_null
+      - name: employer_id
+        description: HH employer ID. Nullable for anonymous postings.
+      - name: area_id
+        description: HH area ID. Nullable.
+      - name: area_name
+        description: City / region name. Nullable.

@@ -13,20 +13,6 @@
 -- Column contract: common subset only.
 -- Source-specific fields (salary, employer, author) are NOT in this table —
 -- Gold Data Vault satellites read them from per-source Silver tables directly.
---
--- Output written to nessie.silver.vacancies (Iceberg via Nessie).
-
-MODEL (
-  name nessie.silver.vacancies,
-  kind FULL,
-  dialect spark,
-  table_format iceberg,
-  depends_on [
-    nessie.silver.tg_messages,
-    nessie.silver.linkedin_posts,
-    nessie.silver.hh_vacancies
-  ]
-);
 
 WITH tg AS (
   SELECT
@@ -39,7 +25,7 @@ WITH tg AS (
     published_at,
     CAST(NULL AS TIMESTAMP)   AS published_at_approx,
     extracted_at
-  FROM nessie.silver.tg_messages
+  FROM {{ ref('tg_messages') }}
 ),
 linkedin AS (
   SELECT
@@ -52,7 +38,7 @@ linkedin AS (
     published_at,
     published_at_approx,
     extracted_at
-  FROM nessie.silver.linkedin_posts
+  FROM {{ ref('linkedin_posts') }}
 ),
 hh AS (
   SELECT
@@ -65,7 +51,7 @@ hh AS (
     published_at,
     CAST(NULL AS TIMESTAMP)   AS published_at_approx,
     extracted_at
-  FROM nessie.silver.hh_vacancies
+  FROM {{ ref('hh_vacancies') }}
 ),
 all_sources AS (
   SELECT * FROM tg

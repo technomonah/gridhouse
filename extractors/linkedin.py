@@ -72,6 +72,9 @@ SESSION_DIR = Path(
 CHROME_BIN = os.environ.get(
     "LINKEDIN_CHROME_BIN", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 )
+# Remote WebDriver URL — set to use selenium/standalone-chromium container.
+# When set, local Chrome binary and chromedriver are not used.
+SELENIUM_URL = os.environ.get("SELENIUM_URL", "")
 QUERY_LIMIT = int(os.environ.get("LINKEDIN_QUERY_LIMIT", "20"))
 
 MINIO_ENDPOINT   = os.environ.get("MINIO_ENDPOINT",    "http://localhost:9000")
@@ -305,28 +308,39 @@ def _human_scroll(driver, steps: int = 4) -> None:
 def make_driver() -> webdriver.Chrome:
     """Create a Selenium Chrome WebDriver with anti-detection settings.
 
+    When SELENIUM_URL is set, connects to a remote selenium/standalone-chromium
+    container. Otherwise, uses a local Chrome binary (macOS dev mode).
+
     Uses a persistent profile directory so cookies and session survive
     across runs. Chrome binary and session dir are configured via env vars.
 
     Returns:
         Configured Chrome WebDriver instance.
     """
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
     opts = Options()
-    opts.binary_location = CHROME_BIN
-    opts.add_argument(f"--user-data-dir={SESSION_DIR}")
-    opts.add_argument("--start-maximized")
-    opts.add_argument("--no-first-run")
-    opts.add_argument("--no-default-browser-check")
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
 
-    # chromedriver path — selenium manager auto-downloads if not set
-    chromedriver = Path.home() / ".cache/selenium/chromedriver/mac-arm64/146.0.7680.165/chromedriver"
-    service = Service(executable_path=str(chromedriver)) if chromedriver.exists() else Service()
+    if SELENIUM_URL:
+        # Remote mode — selenium/standalone-chromium container (Docker).
+        # Persistent user-data-dir is not supported in remote mode.
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--window-size=1920,1080")
+        driver = webdriver.Remote(command_executor=SELENIUM_URL, options=opts)
+    else:
+        # Local mode — macOS dev with Chrome binary and persistent session.
+        SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        opts.binary_location = CHROME_BIN
+        opts.add_argument(f"--user-data-dir={SESSION_DIR}")
+        opts.add_argument("--start-maximized")
+        opts.add_argument("--no-first-run")
+        opts.add_argument("--no-default-browser-check")
+        chromedriver = Path.home() / ".cache/selenium/chromedriver/mac-arm64/146.0.7680.165/chromedriver"
+        service = Service(executable_path=str(chromedriver)) if chromedriver.exists() else Service()
+        driver = webdriver.Chrome(service=service, options=opts)
 
-    driver = webdriver.Chrome(service=service, options=opts)
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
         "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     })
@@ -842,9 +856,11 @@ def main() -> None:
     """CLI entry point for the LinkedIn extractor."""
     args = sys.argv[1:]
 
-    hour = datetime.now().hour
+    from datetime import timezone, timedelta
+    almaty_tz = timezone(timedelta(hours=5))
+    hour = datetime.now(almaty_tz).hour
     if hour < 8 or hour >= 23:
-        print(f"[!] Current time {hour}:xx — outside working hours (08:00–23:00).")
+        print(f"[!] Current time {hour}:xx Almaty — outside working hours (08:00–23:00).")
         sys.exit(0)
 
     if not args:

@@ -2,14 +2,6 @@
 --
 -- Filters to passed_prefilter=true rows only — noise stays in Bronze.
 -- Dedup strategy: MD5(LOWER(TRIM(text))) content hash, earliest extracted_at wins.
--- Output written to nessie.silver.tg_messages (Iceberg via Nessie).
-
-MODEL (
-  name nessie.silver.tg_messages,
-  kind FULL,
-  dialect spark,
-  table_format iceberg
-);
 
 WITH filtered AS (
   -- Keep only prefiltered rows with non-empty text.
@@ -22,7 +14,7 @@ WITH filtered AS (
     published_at,
     extracted_at,
     url
-  FROM nessie.bronze.tg_messages
+  FROM {{ source('bronze', 'tg_messages') }}
   WHERE passed_prefilter = true
     AND text IS NOT NULL
     AND TRIM(text) != ''

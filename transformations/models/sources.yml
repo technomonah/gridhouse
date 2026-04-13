@@ -1,0 +1,49 @@
+version: 2
+
+# External source declarations for Bronze Iceberg tables.
+#
+# Bronze tables are written by PyIceberg extractors (not by dbt) — declaring
+# them as sources allows dbt to track lineage from Bronze → Silver and
+# enables source freshness checks in the future.
+#
+# catalog: nessie (registered in SparkSession / profiles.yml)
+# schema:  bronze
+
+sources:
+  - name: bronze
+    # schema: bronze — dbt-spark with catalog: nessie resolves this as nessie.bronze.<table>
+    # The 'nessie' catalog is registered in SparkSession and set as catalog in profiles.yml.
+    schema: bronze
+    description: "Raw data layer — written by PyIceberg extractors, no transformations."
+    tables:
+      - name: tg_messages
+        description: "Raw Telegram messages — written by extractors/tg.py"
+        columns:
+          - name: message_id
+            description: "Telegram message ID (unique per channel)"
+          - name: channel
+            description: "Channel username without @"
+          - name: text
+            description: "Full message text"
+          - name: passed_prefilter
+            description: "True if message passed keyword prefilter and should be processed"
+
+      - name: linkedin_posts
+        description: "Raw LinkedIn hiring posts — written by extractors/linkedin.py"
+        columns:
+          - name: post_id
+            description: "LinkedIn post ID"
+          - name: published_at_raw
+            description: "Relative timestamp as shown on LinkedIn (e.g. '2 ч.', '1 дн.')"
+          - name: passed_prefilter
+            description: "True if post passed keyword prefilter"
+
+      - name: hh_vacancies
+        description: "Raw HH.ru vacancies — written by extractors/hh.py"
+        columns:
+          - name: vacancy_id
+            description: "HH.ru vacancy ID"
+          - name: employer_id
+            description: "HH.ru employer ID (nullable — anonymous postings have no ID)"
+          - name: passed_prefilter
+            description: "True if vacancy passed keyword prefilter"

@@ -10,15 +10,6 @@
 --
 -- Salary fields are retained as nullable — currency normalization (KZT → USD)
 -- is a Gold-layer concern handled in sat_vacancy_details.
---
--- Output written to nessie.silver.hh_vacancies (Iceberg via Nessie).
-
-MODEL (
-  name nessie.silver.hh_vacancies,
-  kind FULL,
-  dialect spark,
-  table_format iceberg
-);
 
 WITH normalized AS (
   SELECT
@@ -51,7 +42,7 @@ WITH normalized AS (
     published_at,
     extracted_at,
     search_query
-  FROM nessie.bronze.hh_vacancies
+  FROM {{ source('bronze', 'hh_vacancies') }}
   WHERE passed_prefilter = true
 ),
 deduped AS (

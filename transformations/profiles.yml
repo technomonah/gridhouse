@@ -1,0 +1,16 @@
+grindhouse_spark:
+  target: dev
+  outputs:
+    dev:
+      type: spark
+      # method: session — uses the active SparkSession created by run_dbt.py.
+      # No Thrift server needed. dbt-spark picks up SparkSession.getActiveSession().
+      method: session
+      # host is required by dbt-spark schema validation even for method: session.
+      # The value is ignored at runtime — the active SparkSession is used directly.
+      host: localhost
+      # schema: silver — default schema for models without +schema override.
+      # nessie is set as default catalog in SparkSession (spark.sql.defaultCatalog=nessie),
+      # so dbt writes to nessie.<schema>.<model> automatically.
+      schema: silver
+      threads: 4
