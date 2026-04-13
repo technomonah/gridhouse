@@ -75,6 +75,13 @@ SELECT
   CAST(NULL AS TIMESTAMP)           AS published_at,
   published_at_approx,
   extracted_at,
-  post_url                          AS url,
+  -- LinkedIn MHTML snapshots do not contain direct post URLs.
+  -- post_url is a raw componentkey (ck:...) when no feed URL was found.
+  -- Fall back to author_url or company_url as the best available deep-link.
+  CASE
+    WHEN post_url LIKE 'ck:%' OR post_url = ''
+      THEN COALESCE(NULLIF(TRIM(company_url), ''), NULLIF(TRIM(author_url), ''), '')
+    ELSE post_url
+  END                               AS url,
   query                             AS source_query
 FROM deduped

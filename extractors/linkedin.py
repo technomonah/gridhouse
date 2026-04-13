@@ -474,6 +474,7 @@ def _capture_mhtml(driver) -> bytes:
         return result["data"].encode("utf-8")
 
 
+
 def fetch_query(
     driver,
     query_cfg: dict,
@@ -660,9 +661,11 @@ def _extract_cards(html_str: str) -> list[dict]:
         text = re.sub(r"<[^>]+>", " ", card_html)
         text = re.sub(r"\s+", " ", text).strip()
 
+        # LinkedIn MHTML does not contain direct post URLs — use author profile
+        # as the best available link. post_url is kept for potential future use.
         cards.append({
             "post_id":     post_id,
-            "post_url":    post_url or post_id,
+            "post_url":    author_url or post_url,
             "author":      author,
             "author_url":  author_url,
             "company":     company,
@@ -722,6 +725,10 @@ def cmd_fetch(queries: list[dict]) -> list[str]:
     catalog = get_catalog()
     seen_ids = get_seen_post_ids(catalog)
     print(f"Already in Bronze: {len(seen_ids)} posts\n")
+
+    # Randomize query order to avoid detectable sequential access patterns.
+    queries = list(queries)
+    random.shuffle(queries)
 
     driver = make_driver()
     try:

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import sys
 import time
 from datetime import datetime, timezone
@@ -46,8 +47,13 @@ HH_PER_PAGE = int(os.environ.get("HH_PER_PAGE", "100"))
 # Safety cap — HH API silently caps total results at 2000 (20 pages × 100).
 HH_MAX_PAGES = int(os.environ.get("HH_MAX_PAGES", "20"))
 
-# Seconds to sleep between page requests to avoid rate limiting.
+# Base seconds to sleep between page requests to avoid rate limiting.
+# Actual delay is randomized: uniform(base * 0.5, base * 2.0).
 HH_PAGE_DELAY = float(os.environ.get("HH_PAGE_DELAY", "0.5"))
+
+# Max seconds to sleep between different search queries (anti-bot pattern).
+# Actual delay is randomized: uniform(1.0, max).
+HH_BETWEEN_QUERY_DELAY_MAX = float(os.environ.get("HH_BETWEEN_QUERY_DELAY_MAX", "3.0"))
 
 HH_API_BASE = "https://api.hh.ru"
 
@@ -283,7 +289,9 @@ def fetch_vacancies(search_config: dict) -> list[dict]:
         if page + 1 >= total_pages:
             break
 
-        time.sleep(HH_PAGE_DELAY)
+        # Randomize delay to avoid detectable fixed-interval bot patterns.
+        jitter = random.uniform(HH_PAGE_DELAY * 0.5, HH_PAGE_DELAY * 2.0)
+        time.sleep(jitter)
 
     return results
 
@@ -330,6 +338,9 @@ def scrape_search(catalog, search_config: dict, seen_ids: set[str]) -> tuple[int
 def cmd_scrape(searches: list[dict]) -> None:
     """Scrape all given search configs and write raw vacancies to Bronze.
 
+    Randomizes query order and inter-query delays to avoid detectable
+    fixed-interval bot patterns.
+
     Args:
         searches: List of search config dicts (query, area, schedule).
     """
@@ -337,13 +348,23 @@ def cmd_scrape(searches: list[dict]) -> None:
     seen_ids = get_seen_vacancy_ids(catalog)
     print(f"Loaded {len(seen_ids)} existing vacancy IDs for deduplication.\n")
 
+    # Randomize order so sequential runs produce different access patterns.
+    searches = list(searches)
+    random.shuffle(searches)
+
     total_written = 0
     total_passed = 0
 
-    for search_config in searches:
+    for i, search_config in enumerate(searches):
         written, passed = scrape_search(catalog, search_config, seen_ids)
         total_written += written
         total_passed += passed
+
+        # Pause between queries — randomized to avoid bot fingerprinting.
+        if i < len(searches) - 1:
+            between_delay = random.uniform(1.0, HH_BETWEEN_QUERY_DELAY_MAX)
+            print(f"  ⏸ Pause {between_delay:.1f}s before next query...")
+            time.sleep(between_delay)
         print()
 
     print(f"Done. written={total_written}, passed_prefilter={total_passed}")

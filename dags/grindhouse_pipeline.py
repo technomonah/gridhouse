@@ -49,8 +49,8 @@ DEFAULT_ARGS = {
 with DAG(
     dag_id="grindhouse_pipeline",
     description="Grindhouse job hunting pipeline: scrape → transform → score → export",
-    # Daily schedule — switch to @hourly for production
-    schedule_interval="@daily",
+    # Hourly schedule — vacancies appear continuously, early response matters.
+    schedule_interval="0 * * * *",
     start_date=datetime(2026, 4, 1),
     catchup=False,
     # SQLite + SequentialExecutor cannot handle concurrent dag_run updates.
@@ -135,8 +135,22 @@ with DAG(
     )
 
     # -----------------------------------------------------------------------
+    # Notify — send Telegram alert for new priority_apply vacancies
+    # -----------------------------------------------------------------------
+
+    notify = SSHOperator(
+        task_id="notify",
+        ssh_conn_id="grindhouse_host",
+        # Alert for vacancies scored as priority_apply in the last ~70 minutes.
+        # Deduplicates via .notified_hks file — safe to run on every hourly tick.
+        command=(
+            f"{_env} && cd {_project} && {_python} -u scripts/notify_vacancies.py"
+        ),
+    )
+
+    # -----------------------------------------------------------------------
     # Task dependencies
     # -----------------------------------------------------------------------
 
     # Scrape tasks run in parallel, then transform waits for all of them
-    [scrape_hh, scrape_tg, scrape_linkedin] >> transform >> score >> export_vacancies
+    [scrape_hh, scrape_tg, scrape_linkedin] >> transform >> score >> export_vacancies >> notify
