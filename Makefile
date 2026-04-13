@@ -1,4 +1,4 @@
-.PHONY: up down verify init init-silver init-gold gen-session scrape scrape-linkedin scrape-hh download-jars transform transform-plan test-dbt test spark-ui score score-dry-run rescore export lint fmt
+.PHONY: up down verify init init-silver init-gold gen-session scrape scrape-linkedin scrape-hh download-jars transform transform-plan test-dbt test spark-ui trino-cli score score-dry-run rescore export lint fmt
 
 # Start all infrastructure services (MinIO, Nessie) in background
 up:
@@ -67,6 +67,10 @@ test:
 # Open Spark UI in default browser (available only during active job execution)
 spark-ui:
 	open http://localhost:4040
+
+# Open Trino CLI inside the container (run make up first)
+trino-cli:
+	docker exec -it grindhouse-trino trino
 
 # Score unscored vacancies (published within 30 days) via Claude Code CLI
 score:

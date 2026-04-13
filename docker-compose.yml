@@ -173,6 +173,29 @@ services:
     networks:
       - lakehouse
 
+  trino:
+    # Trino query engine — interactive SQL over Iceberg tables via Nessie REST catalog.
+    # UI available at http://localhost:8081 (8080 on host is taken by Airflow).
+    # Connect via CLI: make trino-cli
+    image: trinodb/trino:443
+    container_name: grindhouse-trino
+    depends_on:
+      nessie:
+        condition: service_healthy
+    ports:
+      - "8081:8080"   # Trino UI + JDBC endpoint (8080 on host is Airflow)
+    environment:
+      # MinIO credentials — substituted into iceberg.properties at startup via envsubst
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ./trino/etc/config.properties:/etc/trino/config.properties
+      - ./trino/etc/catalog/iceberg.properties.template:/etc/trino/catalog/iceberg.properties.template
+      - ./trino/entrypoint.sh:/usr/local/bin/trino-entrypoint.sh
+    entrypoint: ["/bin/bash", "/usr/local/bin/trino-entrypoint.sh"]
+    networks:
+      - lakehouse
+
   selenium:
     # Selenium standalone with Chromium — used by LinkedIn extractor inside Airflow.
     # Supports linux/aarch64 (Apple Silicon). VNC available at port 7900 for debugging.
