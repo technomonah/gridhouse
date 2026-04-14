@@ -30,6 +30,7 @@ import pyarrow as pa
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import Message
+from pyiceberg.expressions import EqualTo
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from extractors.catalog import get_catalog, patch_table_io
@@ -86,15 +87,18 @@ def get_max_message_id(catalog, channel: str) -> int:
         Max message_id stored, or 0 if no messages exist yet.
     """
     table = patch_table_io(catalog.load_table("bronze.tg_messages"))
-    from pyiceberg.expressions import EqualTo
     scan = table.scan(
         row_filter=EqualTo("channel", channel),
         selected_fields=("message_id",),
     )
     arrow = scan.to_arrow()
+
     if arrow.num_rows == 0:
-        return 0
-    return int(arrow.column("message_id").to_pylist().__class__(arrow.column("message_id").to_pylist()).pop() if False else max(arrow.column("message_id").to_pylist()))
+        last_message_id = 0
+    else:
+        last_message_id = int(max(arrow.column("message_id").to_pylist()))
+    
+    return last_message_id
 
 
 def write_messages(catalog, messages: list[RawVacancy]) -> None:
