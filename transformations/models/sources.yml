@@ -47,3 +47,12 @@ sources:
             description: "HH.ru employer ID (nullable — anonymous postings have no ID)"
           - name: passed_prefilter
             description: "True if vacancy passed keyword prefilter"
+
+  - name: gold_external
+    # Gold tables written directly by Python scripts (not dbt models).
+    # Declared as sources to maintain lineage in dbt.
+    schema: gold
+    description: "Gold layer tables written by Python scripts, not dbt models."
+    tables:
+      - name: sat_vacancy_score
+        description: "AI scoring results written by scripts/score_vacancies.py via PyIceberg."

@@ -30,3 +30,7 @@ models:
     gold:
       # Gold namespace — Data Vault 2.0 models (hubs, links, SAL, satellites).
       +schema: gold
+
+    mart:
+      # Mart namespace — denormalized flat tables for analysis and reporting.
+      +schema: mart

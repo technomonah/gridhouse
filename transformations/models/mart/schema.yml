@@ -1,0 +1,77 @@
+version: 2
+
+models:
+  - name: mart_vacancies
+    description: >
+      Flat denormalized vacancy mart for analysis and reporting.
+      One row per unique vacancy. Satellites joined at their latest load_dts
+      via ROW_NUMBER() OVER (PARTITION BY hub_vacancy_hk ORDER BY load_dts DESC).
+      Unscored vacancies are included (score/reasoning/recommended_action are NULL).
+      Company columns are NULL for TG and LinkedIn vacancies (no link_vacancy_company row).
+    columns:
+      - name: hub_vacancy_hk
+        description: Surrogate key — FK from hub_vacancy.
+        tests:
+          - not_null
+          - unique
+      - name: content_hash_bk
+        description: MD5 of normalized vacancy text — business key.
+        tests:
+          - not_null
+      - name: first_seen_at
+        description: Timestamp when the vacancy first entered the Gold layer (hub_vacancy.load_dts).
+      - name: source
+        description: Source system identifier (hh, linkedin, telegram).
+      - name: url
+        description: Canonical vacancy URL.
+      - name: text
+        description: Original vacancy text.
+      - name: published_at
+        description: Exact publish timestamp. Nullable (NULL for LinkedIn vacancies).
+      - name: published_at_approx
+        description: Approximate publish date computed from relative timestamp. Nullable.
+      - name: extracted_at
+        description: Timestamp when the vacancy was extracted from the source.
+      - name: salary_from
+        description: Minimum salary. Nullable — HH only.
+      - name: salary_to
+        description: Maximum salary. Nullable — HH only.
+      - name: salary_currency
+        description: Salary currency (e.g. RUR, KZT). Nullable — HH only.
+      - name: salary_gross
+        description: True if salary is gross (before tax). Nullable — HH only.
+      - name: area_name
+        description: Vacancy location city/region. Nullable — HH only.
+      - name: experience
+        description: Required experience level. Nullable — HH only.
+      - name: employment
+        description: Employment type (full, part, etc.). Nullable — HH only.
+      - name: schedule
+        description: Work schedule (remote, office, etc.). Nullable — HH only.
+      - name: contact_author
+        description: LinkedIn post author name. Nullable — LinkedIn only.
+      - name: contact_company
+        description: Company name from LinkedIn post author profile. Nullable — LinkedIn only.
+      - name: contact_author_url
+        description: LinkedIn profile URL of the post author. Nullable — LinkedIn only.
+      - name: tg_channel
+        description: Telegram channel username (without @). Nullable — TG only.
+      - name: score
+        description: AI relevance score (0–10). NULL if vacancy has not been scored yet.
+      - name: reasoning
+        description: 2-sentence explanation of the score. NULL if not scored.
+      - name: recommended_action
+        description: >
+          Recommended next step based on score.
+          skip (0-3) / review (4-6) / apply (7-8) / priority_apply (9-10).
+          NULL if not scored.
+      - name: scored_at
+        description: Timestamp when AI scoring was performed. NULL if not scored.
+      - name: model_version
+        description: Scoring model identifier. NULL if not scored.
+      - name: company_name
+        description: Normalized company name (UPPER TRIM). Nullable — HH and LinkedIn only.
+      - name: employer_id
+        description: HH.ru employer ID. Nullable.
+      - name: company_area_name
+        description: Company's registered city/region (from sat_company_details). Nullable.

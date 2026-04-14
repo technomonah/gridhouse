@@ -185,3 +185,32 @@ models:
         description: HH area ID. Nullable.
       - name: area_name
         description: City / region name. Nullable.
+
+  - name: sat_vacancy_score
+    description: >
+      Data Vault 2.0 Satellite: AI scoring results.
+      Written directly by score_vacancies.py via PyIceberg (not a dbt model).
+      Referenced via source('gold_external', 'sat_vacancy_score') in mart_vacancies.
+    columns:
+      - name: hub_vacancy_hk
+        description: FK to hub_vacancy.
+        tests:
+          - not_null
+      - name: load_dts
+        description: Load timestamp.
+      - name: rec_src
+        description: Always 'claude_code_subprocess'.
+      - name: hash_diff
+        description: MD5(score || reasoning || recommended_action || model_version).
+        tests:
+          - not_null
+      - name: score
+        description: AI relevance score (0–10). Nullable on scoring failure.
+      - name: reasoning
+        description: 2-sentence scoring explanation.
+      - name: recommended_action
+        description: One of — skip (0-3), review (4-6), apply (7-8), priority_apply (9-10).
+      - name: scored_at
+        description: Timestamp when scoring was performed.
+      - name: model_version
+        description: Scoring model identifier.
