@@ -6,6 +6,7 @@ source extractor (Telegram, HH.ru, LinkedIn, Habr Career).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -28,9 +29,25 @@ KEYWORDS: frozenset[str] = frozenset({
     "ищем", "открыта вакансия", "усиливаем", "приглашаем",
 })
 
+# Split keywords into single-word (need word boundary) and multi-word phrases.
+_SINGLE_KEYWORDS = frozenset(kw for kw in KEYWORDS if " " not in kw and "\u00a0" not in kw)
+_PHRASE_KEYWORDS = frozenset(KW for KW in KEYWORDS if KW not in _SINGLE_KEYWORDS)
+
+# Pre-compile a single regex that matches any single-word keyword at a word
+# boundary.  `\b` is Unicode-aware in Python 3, so it works for Cyrillic too.
+_SINGLE_RE = re.compile(
+    r"\b(" + "|".join(re.escape(kw) for kw in sorted(_SINGLE_KEYWORDS)) + r")\b",
+    flags=re.IGNORECASE,
+)
+
 
 def passes_prefilter(text: str) -> bool:
     """Check if text contains at least one job-related keyword.
+
+    Single-word keywords are matched using word boundaries (``\\b``) to
+    avoid false positives — e.g. "spark" no longer matches "sparkle".
+    Multi-word phrases ("data vault", "аналитик данных") keep substring
+    matching since they are already specific enough.
 
     Args:
         text: Raw text from any vacancy source.
@@ -38,8 +55,12 @@ def passes_prefilter(text: str) -> bool:
     Returns:
         True if any keyword is found (case-insensitive).
     """
+    if not text:
+        return False
+    if _SINGLE_RE.search(text):
+        return True
     lowered = text.lower()
-    return any(kw in lowered for kw in KEYWORDS)
+    return any(kw in lowered for kw in _PHRASE_KEYWORDS)
 
 
 # ---------------------------------------------------------------------------
