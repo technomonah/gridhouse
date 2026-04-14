@@ -30,6 +30,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -194,6 +195,8 @@ def score_chunk(vacancies: list[dict]) -> list[dict]:
 
     Calls `claude -p <prompt> --output-format json` as a subprocess.
     The prompt asks Claude to return a JSON array with one object per vacancy.
+    Retries up to 3 times with exponential backoff on transient failures
+    (non-zero exit code or timeout).
 
     Args:
         vacancies: List of dicts with keys hub_vacancy_hk and text.
@@ -211,16 +214,33 @@ def score_chunk(vacancies: list[dict]) -> list[dict]:
         vacancies_json=json.dumps(payload, ensure_ascii=False, indent=2)
     )
 
-    result = subprocess.run(
-        ["claude", "-p", prompt, "--output-format", "json"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            result = subprocess.run(
+                ["claude", "-p", prompt, "--output-format", "json"],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        except subprocess.TimeoutExpired:
+            wait = 2 ** attempt
+            print(f"  [warn] claude timed out (attempt {attempt}/{max_retries}), retrying in {wait}s...")
+            if attempt < max_retries:
+                time.sleep(wait)
+                continue
+            return _fallback_results(vacancies, "timeout after 3 attempts")
 
-    if result.returncode != 0:
-        print(f"  [warn] claude exited {result.returncode}: {result.stderr[:200]}")
-        return _fallback_results(vacancies, f"claude exit {result.returncode}")
+        if result.returncode != 0:
+            stderr_snippet = result.stderr[:300] if result.stderr else "(no stderr)"
+            print(f"  [warn] claude exited {result.returncode} (attempt {attempt}/{max_retries}): {stderr_snippet}")
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                time.sleep(wait)
+                continue
+            return _fallback_results(vacancies, f"claude exit {result.returncode}")
+
+        break  # success
 
     # claude --output-format json wraps the response in {"type": "result", "result": "..."}
     try:
