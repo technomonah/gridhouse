@@ -20,17 +20,20 @@ init:
 gen-session:
 	python3 scripts/gen_session.py
 
-# Run Telegram extractor — fetch new messages into Bronze layer
+# Run Telegram extractor — fetch new messages into Bronze layer.
+# Pass NESSIE_BRANCH=dev to write to the dev branch instead of main.
 scrape:
-	python3 extractors/tg.py scrape
+	NESSIE_BRANCH=$${NESSIE_BRANCH:-main} python3 extractors/tg.py scrape
 
-# Run LinkedIn extractor — fetch new hiring posts into Bronze layer
+# Run LinkedIn extractor — fetch new hiring posts into Bronze layer.
+# Pass NESSIE_BRANCH=dev to write to the dev branch instead of main.
 scrape-linkedin:
-	python3 extractors/linkedin.py scrape
+	NESSIE_BRANCH=$${NESSIE_BRANCH:-main} python3 extractors/linkedin.py scrape
 
-# Run HH.ru extractor — fetch new vacancies into Bronze layer
+# Run HH.ru extractor — fetch new vacancies into Bronze layer.
+# Pass NESSIE_BRANCH=dev to write to the dev branch instead of main.
 scrape-hh:
-	python3 extractors/hh.py scrape
+	NESSIE_BRANCH=$${NESSIE_BRANCH:-main} python3 extractors/hh.py scrape
 
 # Initialize Silver namespace and tables in Iceberg catalog (run after make init)
 init-silver:
