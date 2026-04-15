@@ -102,8 +102,10 @@ services:
       # S3A connector credentials — same MinIO creds used by extractors
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      # Nessie + warehouse config passed through to SparkSession builder in spark_session.py
-      NESSIE_URI: "http://nessie:19120/iceberg/"
+      # Nessie + warehouse config passed through to SparkSession builder in spark_session.py.
+      # NESSIE_URI is intentionally omitted — spark_session.py builds it from NESSIE_BRANCH.
+      # Set NESSIE_BRANCH=dev on the host to run transformations against the dev branch.
+      NESSIE_BRANCH: ${NESSIE_BRANCH:-main}
       ICEBERG_WAREHOUSE: "s3://warehouse"
       # Docker-internal S3 endpoint — Spark runs inside the lakehouse network
       S3_ENDPOINT: "http://minio:9000"
@@ -147,8 +149,9 @@ services:
     ports:
       - "8888:8888"
     environment:
-      # Nessie + MinIO credentials — passed to PyIceberg via env vars in catalog.py
-      NESSIE_URI: "http://nessie:19120/iceberg/"
+      # Nessie + MinIO credentials — passed to PyIceberg via env vars in catalog.py.
+      # NESSIE_URI is intentionally omitted — catalog.py builds it from NESSIE_BRANCH.
+      NESSIE_BRANCH: ${NESSIE_BRANCH:-main}
       S3_ENDPOINT: "http://minio:9000"
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -185,12 +188,16 @@ services:
     ports:
       - "8081:8080"   # Trino UI + JDBC endpoint (8080 on host is Airflow)
     environment:
-      # MinIO credentials — substituted into iceberg.properties at startup via envsubst
+      # MinIO credentials — substituted into iceberg.properties at startup via sed
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      # Controls which branch the iceberg catalog points to (default: main).
+      # iceberg_dev catalog always points to dev regardless of this value.
+      NESSIE_BRANCH: ${NESSIE_BRANCH:-main}
     volumes:
       - ./trino/etc/config.properties:/etc/trino/config.properties
       - ./trino/etc/catalog/iceberg.properties.template:/etc/trino/catalog/iceberg.properties.template
+      - ./trino/etc/catalog/iceberg_dev.properties.template:/etc/trino/catalog/iceberg_dev.properties.template
       - ./trino/entrypoint.sh:/usr/local/bin/trino-entrypoint.sh
     entrypoint: ["/bin/bash", "/usr/local/bin/trino-entrypoint.sh"]
     networks:
@@ -237,7 +244,8 @@ services:
       # Pass MinIO + Nessie creds so DAG tasks can call extractors and scripts
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      NESSIE_URI: "http://nessie:19120/iceberg/"
+      # NESSIE_URI is intentionally omitted — catalog.py builds it from NESSIE_BRANCH.
+      NESSIE_BRANCH: ${NESSIE_BRANCH:-main}
       S3_ENDPOINT: "http://minio:9000"
       # Telegram / LinkedIn credentials (used by extractor DAG tasks)
       TG_API_ID: ${TG_API_ID:-}

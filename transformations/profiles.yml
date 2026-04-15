@@ -14,3 +14,12 @@ grindhouse_spark:
       # so dbt writes to nessie.<schema>.<model> automatically.
       schema: silver
       threads: 4
+    prod:
+      # Same config as dev — branch is controlled via NESSIE_BRANCH env var in spark_session.py.
+      # Use this target as an explicit signal that you're running against main branch.
+      # Usage: NESSIE_BRANCH=main dbt run --target prod
+      type: spark
+      method: session
+      host: localhost
+      schema: silver
+      threads: 4

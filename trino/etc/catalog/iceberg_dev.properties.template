@@ -1,14 +1,13 @@
 connector.name=iceberg
 iceberg.catalog.type=rest
-# Nessie acts as Iceberg REST catalog; /iceberg prefix exposes the REST API.
-# The /main suffix targets the main branch of the Nessie catalog.
-iceberg.rest-catalog.uri=http://nessie:19120/iceberg/${NESSIE_BRANCH}
+# Always points to the dev branch — use iceberg catalog for main branch queries.
+iceberg.rest-catalog.uri=http://nessie:19120/iceberg/dev
 
 # MinIO S3-compatible storage — path-style required for non-AWS endpoints.
 fs.native-s3.enabled=true
 s3.endpoint=http://minio:9000
 s3.region=us-east-1
 s3.path-style-access=true
-# Credentials injected at container start via envsubst (see trino/entrypoint.sh).
+# Credentials injected at container start via sed (see trino/entrypoint.sh).
 s3.aws-access-key=${MINIO_ROOT_USER}
 s3.aws-secret-key=${MINIO_ROOT_PASSWORD}
