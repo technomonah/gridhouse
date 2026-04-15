@@ -97,23 +97,23 @@ with DAG(
     )
 
     # -----------------------------------------------------------------------
-    # Score — run Claude Code scoring on unscored vacancies (via SSH to host)
-    # claude CLI is only available on the host, not inside the container.
+    # Score / Export / Notify — run on host via SSH.
+    # These tasks access the host filesystem (Obsidian vault, .notified_hks)
+    # so they cannot run inside the Airflow container.
     # SSHOperator connects to host.docker.internal using the mounted SSH key.
     # -----------------------------------------------------------------------
 
     _project = "/Users/nikitamanakov/Desktop/vault47/projects/grindhouse/code"
-    # SSH sessions on macOS don't load .zshrc — PATH is minimal.
-    # Prepend nvm node bin so `claude` CLI resolves correctly.
     _python = "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3"
-    _node_bin = "/Users/nikitamanakov/.nvm/versions/node/v22.19.0/bin"
-    _env = f"export PATH={_node_bin}:$PATH"
+    # SSH sessions on macOS don't load .zshrc — source .env explicitly so
+    # GEMINI_API_KEY and other secrets are available to the scripts.
+    _env = f"set -a && source {_project}/.env && set +a"
 
     score = SSHOperator(
         task_id="score",
         ssh_conn_id="grindhouse_host",
         # Score vacancies published within the last 30 days that lack a score.
-        # PATH is extended so `claude` CLI (nvm node) resolves inside the script.
+        # Gemini API key is loaded from .env via _env prefix.
         command=f"{_env} && cd {_project} && {_python} -u scripts/score_vacancies.py",
         # Scoring can take time proportional to number of new vacancies
         cmd_timeout=30 * 60,

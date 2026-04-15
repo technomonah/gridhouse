@@ -1,8 +1,8 @@
-"""Score vacancies using Claude Code CLI subprocess.
+"""Score vacancies using Google Gemini API.
 
 Reads unscored vacancies from gold.hub_vacancy (dbt-created Iceberg table),
 joins to silver.vacancies for text, filters to those published within the last
-30 days, submits chunks of 20 vacancies per Claude Code CLI call, and writes
+30 days, submits chunks of 20 vacancies per Gemini API call, and writes
 results to gold.sat_vacancy_score via PyIceberg.
 
 After the dbt migration, all tables are available directly as nessie.silver.*
@@ -12,11 +12,12 @@ Usage:
     python scripts/score_vacancies.py [--dry-run] [--rescore] [--purge-failed]
 
 Flags:
-    --dry-run:      Print vacancies that would be scored without calling Claude.
+    --dry-run:      Print vacancies that would be scored without calling Gemini.
     --rescore:      Re-score all vacancies, ignoring existing sat_vacancy_score rows.
     --purge-failed: Remove failed (score=NULL) rows, then score them again.
 
 Environment variables:
+    GEMINI_API_KEY      — Google Gemini API key (required).
     NESSIE_URI          — Nessie REST endpoint (default: http://localhost:19120/iceberg/).
     MINIO_ROOT_USER     — MinIO access key.
     MINIO_ROOT_PASSWORD — MinIO secret key.
@@ -28,7 +29,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import subprocess
+import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -46,23 +47,43 @@ from extractors.catalog import get_catalog, patch_table_io
 CHUNK_SIZE = 20
 TEXT_TRUNCATE = 500
 TTL_DAYS = 30
-MODEL_VERSION = "claude-code-subprocess"
+MODEL_VERSION = "gemini-2.5-flash"
 
 SCORING_PROMPT_TEMPLATE = """\
 IMPORTANT: Respond with a raw JSON array only. No markdown. No prose. No code fences. \
 Start your response with [ and end with ]. Nothing before or after.
 
 Task: score job vacancies for this candidate:
-- Role: Analytics Engineer / Data Engineer
+- Name: Nikita, Analytics Engineer / Data Engineer
 - Location: Almaty, Kazakhstan (open to remote)
-- Stack: dbt, ClickHouse, SQL, Python, PostgreSQL
-- Target roles: Analytics Engineer, Data Engineer with dbt+ClickHouse, BI Engineer
-- Experience: mid-level
+- Stack knowledge: dbt, ClickHouse, SQL, Python, PostgreSQL — theoretical + pet project level only, \
+no production experience on this stack
+- Current level: junior+/middle (NOT suitable for senior roles requiring 5+ years of production experience)
+- Target roles: Analytics Engineer, Data Engineer (dbt+ClickHouse preferred), BI Engineer
+- NOT suitable: senior-only roles, pure backend/software engineering, ML engineering, devops/platform
 
-Score 0-10 (0=irrelevant, 10=perfect). recommended_action: skip(0-3), review(4-6), apply(7-8), priority_apply(9-10).
+Scoring rules:
+- Score 0-10 (0=completely irrelevant, 10=perfect match)
+- Senior-only roles (explicitly requires 5+ years, "senior", "lead", "principal"): score ≤ 3
+- Roles explicitly welcoming junior/middle candidates: +1 bonus
+- Stack match (dbt, ClickHouse, SQL): strong positive signal
+- Pure software/backend/devops with no analytics component: score ≤ 2
+
+recommended_action mapping:
+- skip (0-3): not worth applying
+- review (4-6): marginal fit, worth reading carefully
+- apply (7-8): good match
+- priority_apply (9-10): excellent match, apply immediately
+
+Also extract from the vacancy text:
+- company_name: the name of the hiring company (null if not found)
+- recruiter_contact: email, Telegram handle, LinkedIn URL, or phone of the recruiter/contact person \
+(null if not found)
 
 Output format — JSON array, one object per vacancy:
-[{{"hub_vacancy_hk":"<copy from input>","score":<0-10 float>,"reasoning":"<2 sentences>","recommended_action":"<skip|review|apply|priority_apply>"}}]
+[{{"hub_vacancy_hk":"<copy from input>","score":<0-10 float>,"reasoning":"<2 sentences>",\
+"recommended_action":"<skip|review|apply|priority_apply>",\
+"company_name":<string or null>,"recruiter_contact":<string or null>}}]
 
 Input vacancies:
 {vacancies_json}"""
@@ -81,6 +102,8 @@ SAT_SCORE_ARROW_SCHEMA = pa.schema([
     pa.field("recommended_action", pa.string(),        nullable=True),
     pa.field("model_version",      pa.string(),        nullable=True),
     pa.field("scored_at",          pa.timestamp("us"), nullable=True),
+    pa.field("company_name",       pa.string(),        nullable=True),
+    pa.field("recruiter_contact",  pa.string(),        nullable=True),
 ])
 
 
@@ -89,22 +112,32 @@ def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _hash_diff(score: float | None, reasoning: str | None, action: str | None) -> str:
+def _hash_diff(
+    score: float | None,
+    reasoning: str | None,
+    action: str | None,
+    company_name: str | None = None,
+    recruiter_contact: str | None = None,
+) -> str:
     """Compute hash_diff over scoring attributes for change detection.
 
     Args:
         score: Numeric score 0-10, or None if scoring failed.
         reasoning: Scoring rationale text, or None.
         action: Recommended action string, or None.
+        company_name: Extracted company name, or None.
+        recruiter_contact: Extracted recruiter contact, or None.
 
     Returns:
         MD5 hex string over concatenated scoring attributes.
     """
     raw = "||".join([
-        str(score)  if score    is not None else "^^",
-        reasoning   if reasoning is not None else "^^",
-        action      if action   is not None else "^^",
+        str(score)          if score             is not None else "^^",
+        reasoning           if reasoning         is not None else "^^",
+        action              if action            is not None else "^^",
         MODEL_VERSION,
+        company_name        if company_name      is not None else "^^",
+        recruiter_contact   if recruiter_contact is not None else "^^",
     ])
     return hashlib.md5(raw.encode()).hexdigest()
 
@@ -155,9 +188,11 @@ def load_unscored_vacancies(catalog, rescore: bool) -> list[dict]:
         try:
             score_table = patch_table_io(catalog.load_table("gold.sat_vacancy_score"))
             scored_rows = score_table.scan(
-                selected_fields=("hub_vacancy_hk",)
+                selected_fields=("hub_vacancy_hk", "score")
             ).to_arrow().to_pylist()
-            scored_keys = {row["hub_vacancy_hk"] for row in scored_rows}
+            # Only treat as scored if score is non-NULL — NULL means a previous
+            # attempt failed (transient API error) and should be retried.
+            scored_keys = {row["hub_vacancy_hk"] for row in scored_rows if row.get("score") is not None}
         except Exception:
             # Table may be empty — treat as no existing scores
             pass
@@ -187,25 +222,75 @@ def load_unscored_vacancies(catalog, rescore: bool) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Scoring via Claude Code CLI
+# Schema evolution
+# ---------------------------------------------------------------------------
+
+def _evolve_score_schema(catalog) -> None:
+    """Add company_name and recruiter_contact columns to sat_vacancy_score if missing.
+
+    PyIceberg supports schema evolution via update_schema(). This function is
+    idempotent — it checks for column existence before adding.
+
+    Args:
+        catalog: Connected PyIceberg catalog instance.
+    """
+    try:
+        table = patch_table_io(catalog.load_table("gold.sat_vacancy_score"))
+        schema = table.schema()
+        existing_names = {field.name for field in schema.fields}
+
+        new_columns = [
+            ("company_name",      "optional string"),
+            ("recruiter_contact", "optional string"),
+        ]
+
+        needs_update = [col for col, _ in new_columns if col not in existing_names]
+        if not needs_update:
+            return
+
+        from pyiceberg.types import StringType
+        with table.update_schema() as update:
+            for col_name, _ in new_columns:
+                if col_name not in existing_names:
+                    update.add_column(col_name, StringType())
+
+        print(f"  schema evolved: added columns {needs_update}")
+    except Exception as exc:
+        # Non-fatal — scoring can continue with old schema, new fields will be dropped
+        print(f"  [warn] schema evolution failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Scoring via Gemini API
 # ---------------------------------------------------------------------------
 
 def score_chunk(vacancies: list[dict]) -> list[dict]:
-    """Score a chunk of vacancies using Claude Code CLI.
+    """Score a chunk of vacancies using Google Gemini API.
 
-    Calls `claude -p <prompt> --output-format json` as a subprocess.
-    The prompt asks Claude to return a JSON array with one object per vacancy.
-    Retries up to 3 times with exponential backoff on transient failures
-    (non-zero exit code or timeout).
+    Calls the Gemini generative model with a structured prompt asking for a
+    JSON array with one scoring object per vacancy. Retries up to 3 times
+    with exponential backoff on transient API failures.
 
     Args:
         vacancies: List of dicts with keys hub_vacancy_hk and text.
 
     Returns:
         List of scored dicts with keys hub_vacancy_hk, score, reasoning,
-        recommended_action. Returns partial results if Claude returns fewer
-        items than expected.
+        recommended_action, company_name, recruiter_contact. Returns partial
+        results with null scores if Gemini fails after all retries.
     """
+    try:
+        from google import genai
+        from google.genai import types as genai_types
+    except ImportError:
+        return _fallback_results(vacancies, "google-genai not installed; run: pip install google-genai")
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return _fallback_results(vacancies, "GEMINI_API_KEY env var not set")
+
+    client = genai.Client(api_key=api_key)
+
     payload = [
         {"hub_vacancy_hk": v["hub_vacancy_hk"], "text": v["text"][:TEXT_TRUNCATE]}
         for v in vacancies
@@ -215,47 +300,31 @@ def score_chunk(vacancies: list[dict]) -> list[dict]:
     )
 
     max_retries = 3
+    last_error = ""
     for attempt in range(1, max_retries + 1):
         try:
-            result = subprocess.run(
-                ["claude", "-p", prompt, "--output-format", "json"],
-                capture_output=True,
-                text=True,
-                timeout=180,
+            response = client.models.generate_content(
+                model=MODEL_VERSION,
+                contents=prompt,
             )
-        except subprocess.TimeoutExpired:
+            raw_text = response.text
+            break
+        except Exception as exc:
+            last_error = str(exc)
             wait = 2 ** attempt
-            print(f"  [warn] claude timed out (attempt {attempt}/{max_retries}), retrying in {wait}s...")
+            print(f"  [warn] Gemini API error (attempt {attempt}/{max_retries}): {exc}, retrying in {wait}s...")
             if attempt < max_retries:
                 time.sleep(wait)
-                continue
-            return _fallback_results(vacancies, "timeout after 3 attempts")
+    else:
+        return _fallback_results(vacancies, f"Gemini API failed after {max_retries} attempts: {last_error}")
 
-        if result.returncode != 0:
-            stderr_snippet = result.stderr[:300] if result.stderr else "(no stderr)"
-            print(f"  [warn] claude exited {result.returncode} (attempt {attempt}/{max_retries}): {stderr_snippet}")
-            if attempt < max_retries:
-                wait = 2 ** attempt
-                time.sleep(wait)
-                continue
-            return _fallback_results(vacancies, f"claude exit {result.returncode}")
-
-        break  # success
-
-    # claude --output-format json wraps the response in {"type": "result", "result": "..."}
-    try:
-        outer = json.loads(result.stdout)
-        raw_text = outer.get("result", result.stdout)
-    except json.JSONDecodeError:
-        raw_text = result.stdout
-
-    # Extract JSON array from the response text (strip any surrounding prose)
+    # Extract JSON array from response (strip any surrounding prose just in case)
     try:
         start = raw_text.index("[")
         end = raw_text.rindex("]") + 1
         scored = json.loads(raw_text[start:end])
     except (ValueError, json.JSONDecodeError) as exc:
-        print(f"  [warn] failed to parse response: {exc}")
+        print(f"  [warn] failed to parse Gemini response: {exc}")
         return _fallback_results(vacancies, f"parse error: {exc}")
 
     return scored
@@ -277,6 +346,8 @@ def _fallback_results(vacancies: list[dict], reason: str) -> list[dict]:
             "score":              None,
             "reasoning":          f"scoring failed: {reason}",
             "recommended_action": None,
+            "company_name":       None,
+            "recruiter_contact":  None,
         }
         for v in vacancies
     ]
@@ -309,10 +380,15 @@ def purge_failed_scores(catalog) -> int:
         print("No failed rows to purge.")
         return 0
 
-    # Overwrite table with only valid rows
+    # Overwrite table with only valid rows, filling new columns with None if absent
     ok_arrow = pa.table(
-        {col: pa.array([r[col] for r in ok_rows], type=SAT_SCORE_ARROW_SCHEMA.field(col).type)
-         for col in SAT_SCORE_ARROW_SCHEMA.names},
+        {
+            col: pa.array(
+                [r.get(col) for r in ok_rows],
+                type=SAT_SCORE_ARROW_SCHEMA.field(col).type,
+            )
+            for col in SAT_SCORE_ARROW_SCHEMA.names
+        },
         schema=SAT_SCORE_ARROW_SCHEMA,
     )
     table.overwrite(ok_arrow)
@@ -337,16 +413,20 @@ def write_scores(catalog, scored_rows: list[dict]) -> None:
         score = item.get("score")
         reasoning = item.get("reasoning")
         action = item.get("recommended_action")
+        company_name = item.get("company_name")
+        recruiter_contact = item.get("recruiter_contact")
         rows.append({
             "hub_vacancy_hk":     item["hub_vacancy_hk"],
             "load_dts":           now,
-            "rec_src":            "claude_code_subprocess",
-            "hash_diff":          _hash_diff(score, reasoning, action),
+            "rec_src":            "gemini_api",
+            "hash_diff":          _hash_diff(score, reasoning, action, company_name, recruiter_contact),
             "score":              float(score) if score is not None else None,
             "reasoning":          reasoning,
             "recommended_action": action,
             "model_version":      MODEL_VERSION,
             "scored_at":          now,
+            "company_name":       company_name,
+            "recruiter_contact":  recruiter_contact,
         })
 
     if not rows:
@@ -371,11 +451,11 @@ def write_scores(catalog, scored_rows: list[dict]) -> None:
 def main() -> None:
     """Run scoring pipeline: load unscored vacancies → chunk → score → write."""
     parser = argparse.ArgumentParser(
-        description="Score vacancies via Claude Code CLI subprocess"
+        description="Score vacancies via Google Gemini API"
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="Print vacancies that would be scored without calling Claude"
+        help="Print vacancies that would be scored without calling Gemini"
     )
     parser.add_argument(
         "--rescore", action="store_true",
@@ -392,6 +472,9 @@ def main() -> None:
     if args.purge_failed:
         print("Purging failed score rows...")
         purge_failed_scores(catalog)
+
+    # Evolve schema to add company_name / recruiter_contact if not present
+    _evolve_score_schema(catalog)
 
     vacancies = load_unscored_vacancies(catalog, rescore=args.rescore)
     print(f"Found {len(vacancies)} vacancies to score (published within {TTL_DAYS} days)")

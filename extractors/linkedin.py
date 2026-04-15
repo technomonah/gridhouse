@@ -747,7 +747,12 @@ def cmd_fetch(queries: list[dict]) -> list[str]:
                 print(f"  ⏸ Pause {wait:.0f}s...")
                 time.sleep(wait)
     finally:
-        driver.quit()
+        try:
+            driver.quit()
+        except Exception:
+            # Remote Chromium container may time out on session teardown (DELETE /session).
+            # The scraping is already done at this point — ignore the cleanup error.
+            pass
 
     print(f"\nFetch done. {len(saved)}/{len(queries)} snapshots saved.")
     return saved
