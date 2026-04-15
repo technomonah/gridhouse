@@ -1,6 +1,9 @@
 # Env
 .env
 
+# Runtime state
+scripts/.notified_hks
+
 # Telethon
 *.session
 *.session-journal
