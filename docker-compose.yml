@@ -248,6 +248,7 @@ services:
       # Pass MinIO + Nessie creds so DAG tasks can call extractors and scripts
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       # NESSIE_URI is intentionally omitted — catalog.py builds it from NESSIE_BRANCH.
       NESSIE_BRANCH: ${NESSIE_BRANCH:-main}
       S3_ENDPOINT: "http://minio:9000"

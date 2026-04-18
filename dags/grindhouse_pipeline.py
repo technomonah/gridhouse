@@ -101,14 +101,12 @@ with DAG(
     # ANTHROPIC_API_KEY and other secrets are available to the scripts.
     _env = f"set -a && source {_project}/.env && set +a"
 
-    score = SSHOperator(
+    score = BashOperator(
         task_id="score",
-        ssh_conn_id="grindhouse_host",
         # Score vacancies published within the last 30 days that lack a score.
-        # Claude API key is loaded from .env via _env prefix.
-        command=f"{_env} && cd {_project} && {_python} -u scripts/score_vacancies.py",
-        # Scoring can take time proportional to number of new vacancies
-        cmd_timeout=30 * 60,
+        # Runs inside Airflow container — Nessie and Claude API both reachable.
+        bash_command="cd /opt/grindhouse && python3 -u scripts/score_vacancies.py",
+        execution_timeout=timedelta(minutes=30),
     )
 
     # -----------------------------------------------------------------------
