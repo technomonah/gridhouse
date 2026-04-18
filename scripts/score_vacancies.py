@@ -1,8 +1,8 @@
-"""Score vacancies using Google Gemini API.
+"""Score vacancies using Anthropic Claude API.
 
 Reads unscored vacancies from gold.hub_vacancy (dbt-created Iceberg table),
 joins to silver.vacancies for text, filters to those published within the last
-30 days, submits chunks of 20 vacancies per Gemini API call, and writes
+30 days, submits chunks of 20 vacancies per Claude API call, and writes
 results to gold.sat_vacancy_score via PyIceberg.
 
 After the dbt migration, all tables are available directly as nessie.silver.*
@@ -12,12 +12,12 @@ Usage:
     python scripts/score_vacancies.py [--dry-run] [--rescore] [--purge-failed]
 
 Flags:
-    --dry-run:      Print vacancies that would be scored without calling Gemini.
+    --dry-run:      Print vacancies that would be scored without calling Claude.
     --rescore:      Re-score all vacancies, ignoring existing sat_vacancy_score rows.
     --purge-failed: Remove failed (score=NULL) rows, then score them again.
 
 Environment variables:
-    GEMINI_API_KEY      — Google Gemini API key (required).
+    ANTHROPIC_API_KEY   — Anthropic Claude API key (required).
     NESSIE_URI          — Nessie REST endpoint (default: http://localhost:19120/iceberg/).
     MINIO_ROOT_USER     — MinIO access key.
     MINIO_ROOT_PASSWORD — MinIO secret key.
@@ -47,7 +47,7 @@ from extractors.catalog import get_catalog, patch_table_io
 CHUNK_SIZE = 20
 TEXT_TRUNCATE = 500
 TTL_DAYS = 30
-MODEL_VERSION = "gemini-2.5-flash"
+MODEL_VERSION = "claude-haiku-4-5-20251001"
 
 SCORING_PROMPT_TEMPLATE = """\
 IMPORTANT: Respond with a raw JSON array only. No markdown. No prose. No code fences. \
@@ -261,15 +261,16 @@ def _evolve_score_schema(catalog) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scoring via Gemini API
+# Scoring via Claude API
 # ---------------------------------------------------------------------------
 
 def score_chunk(vacancies: list[dict]) -> list[dict]:
-    """Score a chunk of vacancies using Google Gemini API.
+    """Score a chunk of vacancies using Anthropic Claude API.
 
-    Calls the Gemini generative model with a structured prompt asking for a
-    JSON array with one scoring object per vacancy. Retries up to 3 times
-    with exponential backoff on transient API failures.
+    Calls the Claude model with a structured prompt asking for a JSON array
+    with one scoring object per vacancy. Retries up to 3 times with exponential
+    backoff on transient API failures. RESOURCE_EXHAUSTED (429) errors are not
+    retried — they indicate billing issues, not transient failures.
 
     Args:
         vacancies: List of dicts with keys hub_vacancy_hk and text.
@@ -277,19 +278,18 @@ def score_chunk(vacancies: list[dict]) -> list[dict]:
     Returns:
         List of scored dicts with keys hub_vacancy_hk, score, reasoning,
         recommended_action, company_name, recruiter_contact. Returns partial
-        results with null scores if Gemini fails after all retries.
+        results with null scores if Claude fails after all retries.
     """
     try:
-        from google import genai
-        from google.genai import types as genai_types
+        import anthropic
     except ImportError:
-        return _fallback_results(vacancies, "google-genai not installed; run: pip install google-genai")
+        return _fallback_results(vacancies, "anthropic not installed; run: pip install anthropic")
 
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        return _fallback_results(vacancies, "GEMINI_API_KEY env var not set")
+        return _fallback_results(vacancies, "ANTHROPIC_API_KEY env var not set")
 
-    client = genai.Client(api_key=api_key)
+    client = anthropic.Anthropic(api_key=api_key)
 
     payload = [
         {"hub_vacancy_hk": v["hub_vacancy_hk"], "text": v["text"][:TEXT_TRUNCATE]}
@@ -303,20 +303,24 @@ def score_chunk(vacancies: list[dict]) -> list[dict]:
     last_error = ""
     for attempt in range(1, max_retries + 1):
         try:
-            response = client.models.generate_content(
+            response = client.messages.create(
                 model=MODEL_VERSION,
-                contents=prompt,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}],
             )
-            raw_text = response.text
+            raw_text = response.content[0].text
             break
+        except anthropic.RateLimitError as exc:
+            # 429 with billing exhaustion — retrying won't help
+            return _fallback_results(vacancies, f"Claude API rate limit / billing exhausted: {exc}")
         except Exception as exc:
             last_error = str(exc)
             wait = 2 ** attempt
-            print(f"  [warn] Gemini API error (attempt {attempt}/{max_retries}): {exc}, retrying in {wait}s...")
+            print(f"  [warn] Claude API error (attempt {attempt}/{max_retries}): {exc}, retrying in {wait}s...")
             if attempt < max_retries:
                 time.sleep(wait)
     else:
-        return _fallback_results(vacancies, f"Gemini API failed after {max_retries} attempts: {last_error}")
+        return _fallback_results(vacancies, f"Claude API failed after {max_retries} attempts: {last_error}")
 
     # Extract JSON array from response (strip any surrounding prose just in case)
     try:
@@ -324,7 +328,7 @@ def score_chunk(vacancies: list[dict]) -> list[dict]:
         end = raw_text.rindex("]") + 1
         scored = json.loads(raw_text[start:end])
     except (ValueError, json.JSONDecodeError) as exc:
-        print(f"  [warn] failed to parse Gemini response: {exc}")
+        print(f"  [warn] failed to parse Claude response: {exc}")
         return _fallback_results(vacancies, f"parse error: {exc}")
 
     return scored
@@ -418,7 +422,7 @@ def write_scores(catalog, scored_rows: list[dict]) -> None:
         rows.append({
             "hub_vacancy_hk":     item["hub_vacancy_hk"],
             "load_dts":           now,
-            "rec_src":            "gemini_api",
+            "rec_src":            "claude_api",
             "hash_diff":          _hash_diff(score, reasoning, action, company_name, recruiter_contact),
             "score":              float(score) if score is not None else None,
             "reasoning":          reasoning,
@@ -451,11 +455,11 @@ def write_scores(catalog, scored_rows: list[dict]) -> None:
 def main() -> None:
     """Run scoring pipeline: load unscored vacancies → chunk → score → write."""
     parser = argparse.ArgumentParser(
-        description="Score vacancies via Google Gemini API"
+        description="Score vacancies via Anthropic Claude API"
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="Print vacancies that would be scored without calling Gemini"
+        help="Print vacancies that would be scored without calling Claude"
     )
     parser.add_argument(
         "--rescore", action="store_true",

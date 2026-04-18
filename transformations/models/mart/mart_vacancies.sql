@@ -55,7 +55,7 @@ SELECT
   d.text,
   d.published_at,
   d.published_at_approx,
-  d.extracted_at,
+  d.load_dts                          AS extracted_at,
 
   -- HH-specific fields (sat_vacancy_source)
   s.salary_from,

@@ -1,0 +1,70 @@
+version: 2
+
+models:
+  - name: bv_vacancy_score
+    description: >
+      Business Vault: latest AI score per vacancy.
+      Wraps gold_external.sat_vacancy_score as a dbt model for proper lineage.
+      One row per vacancy (latest load_dts wins). Includes entity extraction fields
+      (company_name, recruiter_contact) written by score_vacancies.py.
+    columns:
+      - name: hub_vacancy_hk
+        description: FK to hub_vacancy.
+        tests:
+          - not_null
+          - unique
+      - name: score
+        description: AI relevance score (0–10). Nullable on scoring failure.
+      - name: recommended_action
+        description: One of — skip (0-3), review (4-6), apply (7-8), priority_apply (9-10).
+      - name: company_name
+        description: Company name extracted from vacancy text by Claude. Nullable.
+      - name: recruiter_contact
+        description: Recruiter email, Telegram handle, or LinkedIn URL extracted from text. Nullable.
+
+  - name: bv_vacancy_status
+    description: >
+      Business Vault: computed vacancy lifecycle attributes.
+      One row per vacancy. is_active uses 30-day TTL from publish date.
+      Vacancies with unknown publish date are treated as active.
+    columns:
+      - name: hub_vacancy_hk
+        description: FK to hub_vacancy.
+        tests:
+          - not_null
+          - unique
+      - name: source
+        description: Source system (hh, linkedin, telegram).
+      - name: effective_published_at
+        description: publish_at if set, else published_at_approx.
+      - name: is_active
+        description: True if published within 30 days or publish date unknown.
+        tests:
+          - not_null
+      - name: days_since_published
+        description: Days elapsed since effective_published_at. NULL if date unknown.
+
+  - name: bv_company
+    description: >
+      Business Vault: enriched company view.
+      Merges structured HH company data (hub_company + sat_company_details) with
+      company names extracted from vacancy text by score_vacancies.py (TG/LinkedIn).
+      One row per unique company. name_source indicates the data origin.
+    columns:
+      - name: hub_company_hk
+        description: FK to hub_company. NULL for extracted-only companies (TG/LinkedIn).
+      - name: company_name
+        description: Company name. Structured HH name or extracted from text.
+        tests:
+          - not_null
+      - name: employer_id
+        description: HH employer ID. NULL for extracted companies and anonymous postings.
+      - name: area_name
+        description: City / region. NULL for extracted companies.
+      - name: name_source
+        description: Origin of the company name — 'structured' (HH hub) or 'extracted' (AI).
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['structured', 'extracted']

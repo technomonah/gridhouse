@@ -1,4 +1,4 @@
-FROM apache/airflow:2.9.2-python3.11
+FROM apache/airflow:3.2.0-python3.11
 
 # Install extractor dependencies at build time — avoids slow pip install on every container start.
 # Conflicts with pre-installed packages are warnings only (gcsfs/fsspec, httpcore/h11).

@@ -240,7 +240,11 @@ services:
       AIRFLOW__CORE__EXECUTOR: SequentialExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-grindhouse_dev_key}
+      # Airflow 3: [webserver] settings moved to [api]; JWT secret required for api-server auth
+      AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-grindhouse_dev_key}
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_SECRET_KEY:-grindhouse_dev_key}
+      AIRFLOW__API__PORT: "8080"
+      AIRFLOW__API__HOST: "0.0.0.0"
       # Pass MinIO + Nessie creds so DAG tasks can call extractors and scripts
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}

@@ -50,11 +50,9 @@ with DAG(
     dag_id="grindhouse_pipeline",
     description="Grindhouse job hunting pipeline: scrape → transform → score → export",
     # Hourly schedule — vacancies appear continuously, early response matters.
-    schedule_interval="0 * * * *",
+    schedule="0 * * * *",
     start_date=datetime(2026, 4, 1),
     catchup=False,
-    # SQLite + SequentialExecutor cannot handle concurrent dag_run updates.
-    # Limit to 1 active run to avoid StaleDataError on the dag_run table.
     max_active_runs=1,
     default_args=DEFAULT_ARGS,
     tags=["grindhouse", "pipeline"],
@@ -64,11 +62,8 @@ with DAG(
     # Scrape tasks — run in parallel, all sources are independent
     # -----------------------------------------------------------------------
 
-    scrape_hh = BashOperator(
-        task_id="scrape_hh",
-        # HH.ru extractor: fetch new vacancies from HH API into Bronze layer
-        bash_command="cd /opt/grindhouse && python3 -u extractors/hh.py scrape",
-    )
+    # scrape_hh disabled — HH API returns 403 (rate limit / IP ban).
+    # Re-enable by uncommenting and adding back to the dependency list below.
 
     scrape_tg = BashOperator(
         task_id="scrape_tg",
@@ -76,11 +71,8 @@ with DAG(
         bash_command="cd /opt/grindhouse && python3 -u extractors/tg.py scrape",
     )
 
-    scrape_linkedin = BashOperator(
-        task_id="scrape_linkedin",
-        # LinkedIn extractor: fetch new hiring posts into Bronze layer
-        bash_command="cd /opt/grindhouse && python3 -u extractors/linkedin.py scrape",
-    )
+    # scrape_linkedin disabled — LinkedIn detects remote Selenium and invalidates session.
+    # Re-enable by uncommenting and adding back to the dependency list below.
 
     # -----------------------------------------------------------------------
     # Transform — dbt run inside Spark container (all Silver + Gold models)
@@ -106,14 +98,14 @@ with DAG(
     _project = "/Users/nikitamanakov/Desktop/vault47/projects/grindhouse/code"
     _python = "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3"
     # SSH sessions on macOS don't load .zshrc — source .env explicitly so
-    # GEMINI_API_KEY and other secrets are available to the scripts.
+    # ANTHROPIC_API_KEY and other secrets are available to the scripts.
     _env = f"set -a && source {_project}/.env && set +a"
 
     score = SSHOperator(
         task_id="score",
         ssh_conn_id="grindhouse_host",
         # Score vacancies published within the last 30 days that lack a score.
-        # Gemini API key is loaded from .env via _env prefix.
+        # Claude API key is loaded from .env via _env prefix.
         command=f"{_env} && cd {_project} && {_python} -u scripts/score_vacancies.py",
         # Scoring can take time proportional to number of new vacancies
         cmd_timeout=30 * 60,
@@ -153,4 +145,6 @@ with DAG(
     # -----------------------------------------------------------------------
 
     # Scrape tasks run in parallel, then transform waits for all of them
-    [scrape_hh, scrape_tg, scrape_linkedin] >> transform >> score >> export_vacancies >> notify
+    # scrape_hh excluded — temporarily disabled (HH API 403)
+    # scrape_linkedin excluded — LinkedIn detects remote Selenium
+    [scrape_tg] >> transform >> score >> export_vacancies >> notify

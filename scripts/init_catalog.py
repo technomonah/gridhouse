@@ -242,12 +242,14 @@ _TG_CHANNELS = [
     "datascienceml_jobs",
     "job_analyst_datascience",
     "foranalysts",
+    "hirifyme_bot",
+    "hcareers_bot",
 ]
 
 # Composite boolean queries using LinkedIn's (A OR B) "phrase" syntax.
 # Each query covers all 6 hiring signals against one role/technology target.
 # Duplicates across queries are harmless — Bronze dedup removes them by post_id.
-_SIGNALS = "(нанимаем OR ищу OR ищем OR набираем OR нанимаю OR усиливаем OR приглашаем)"
+_SIGNALS = "(нанимаем OR ищу OR ищем OR набираем OR нанимаю OR приглашаем)"
 _LINKEDIN_QUERIES = [
     # Data Engineer — English and common Russian spellings
     f'{_SIGNALS} "data engineer"',

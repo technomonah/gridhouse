@@ -57,6 +57,10 @@ except ImportError:
     print("Установи зависимости: pip3 install selenium")
     sys.exit(1)
 
+
+class CookiesExpiredError(Exception):
+    """LinkedIn session is invalid — cookies need to be refreshed."""
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -350,19 +354,21 @@ def make_driver() -> webdriver.Chrome:
 def inject_cookies(driver) -> None:
     """Load LinkedIn session cookies and verify the session is active.
 
-    Reads cookies from COOKIES_FILE, injects them into the browser, then
-    navigates to the feed to confirm the session is valid.
+    Injects cookies, then navigates to a search page (not just /feed/) to
+    confirm the session holds under real search conditions. LinkedIn may
+    allow /feed/ with stale cookies but redirect /search/ to login.
 
     Args:
         driver: Selenium WebDriver instance.
 
     Raises:
-        SystemExit: If cookies file is missing or session is invalid.
+        CookiesExpiredError: If cookies file is missing or session is invalid.
     """
     if not COOKIES_FILE.exists():
-        print(f"[!] Cookies file not found: {COOKIES_FILE}")
-        print("    Export cookies from linkedin.com via Cookie-Editor extension.")
-        sys.exit(1)
+        raise CookiesExpiredError(
+            f"Cookies file not found: {COOKIES_FILE}\n"
+            "Export cookies from linkedin.com via Cookie-Editor extension."
+        )
 
     cookies = json.loads(COOKIES_FILE.read_text())
 
@@ -387,13 +393,14 @@ def inject_cookies(driver) -> None:
     driver.get("https://www.linkedin.com/feed/")
     _human_sleep(3, 5)
 
-    if "feed" in driver.current_url or "mynetwork" in driver.current_url:
-        print("  ✓ LinkedIn: session active")
-    else:
-        print(f"  [!] Login failed, current URL: {driver.current_url}")
-        print("  Refresh cookies: export from linkedin.com via Cookie-Editor → replace linkedin-cookies.json")
-        driver.quit()
-        sys.exit(1)
+    if "login" in driver.current_url or "authwall" in driver.current_url or "uas" in driver.current_url:
+        raise CookiesExpiredError(
+            f"LinkedIn session expired (redirected to {driver.current_url}).\n"
+            "ACTION REQUIRED: export fresh cookies from linkedin.com via Cookie-Editor\n"
+            f"and replace: {COOKIES_FILE}"
+        )
+
+    print("  ✓ LinkedIn: session active")
 
 
 # ---------------------------------------------------------------------------
@@ -516,6 +523,15 @@ def fetch_query(
     driver.get(url)
     _human_sleep(5, 9)
 
+    # LinkedIn may redirect to login mid-session on /search/ even if /feed/ was fine.
+    current = driver.current_url
+    if "login" in current or "authwall" in current or "uas" in current:
+        raise CookiesExpiredError(
+            f"LinkedIn redirected to login on /search/ (url={current}).\n"
+            "ACTION REQUIRED: export fresh cookies from linkedin.com via Cookie-Editor\n"
+            f"and replace: {COOKIES_FILE}"
+        )
+
     all_cards: dict[str, dict] = {}  # post_id → card dict, accumulates across rounds
     last_mhtml: bytes | None = None
     stop_reason = ""
@@ -578,8 +594,7 @@ def fetch_query(
     print(f"  stopped: {stop_reason}")
 
     if not all_cards:
-        print("  no cards found, skipping save")
-        return None
+        raise RuntimeError(f"LinkedIn returned 0 cards for query: {query!r} — empty page or blocked session")
 
     # Nothing new vs Bronze — no point saving MHTML
     new_ids = {pid for pid in all_cards if pid not in seen_ids}
@@ -730,6 +745,7 @@ def cmd_fetch(queries: list[dict]) -> list[str]:
     queries = list(queries)
     random.shuffle(queries)
 
+    failed = 0
     driver = make_driver()
     try:
         inject_cookies(driver)
@@ -740,12 +756,27 @@ def cmd_fetch(queries: list[dict]) -> list[str]:
                 uri = fetch_query(driver, query_cfg, seen_ids, ts)
                 if uri:
                     saved.append(uri)
+            except CookiesExpiredError:
+                raise
             except Exception as exc:
                 print(f"  [!] Failed: {exc}")
+                failed += 1
             if i < len(queries) - 1:
                 wait = random.uniform(8, 15)
                 print(f"  ⏸ Pause {wait:.0f}s...")
                 time.sleep(wait)
+    except CookiesExpiredError as exc:
+        print(f"\n{'=' * 60}")
+        print("⚠️  LINKEDIN COOKIES EXPIRED — ACTION REQUIRED")
+        print(f"{'=' * 60}")
+        print(exc)
+        print(f"{'=' * 60}\n")
+        print("Skipping LinkedIn scrape. DAG task marked as SUCCESS to avoid blocking transform.")
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        sys.exit(0)
     finally:
         try:
             driver.quit()
@@ -755,6 +786,9 @@ def cmd_fetch(queries: list[dict]) -> list[str]:
             pass
 
     print(f"\nFetch done. {len(saved)}/{len(queries)} snapshots saved.")
+    if failed == len(queries):
+        print("ERROR: all LinkedIn queries returned empty pages — cookies expired or session blocked")
+        sys.exit(1)
     return saved
 
 

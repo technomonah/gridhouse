@@ -25,9 +25,9 @@ from pyspark.sql import SparkSession
 # ---------------------------------------------------------------------------
 
 NESSIE_BRANCH = os.environ.get("NESSIE_BRANCH", "main")
-NESSIE_URI = os.environ.get("NESSIE_URI", f"http://localhost:19120/iceberg/{NESSIE_BRANCH}")
+NESSIE_URI = os.environ.get("NESSIE_URI", f"http://nessie:19120/iceberg/{NESSIE_BRANCH}")
 ICEBERG_WAREHOUSE = os.environ.get("ICEBERG_WAREHOUSE", "s3://warehouse")
-S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "http://localhost:9000")
+S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "http://minio:9000")
 S3_ACCESS_KEY = os.environ.get("MINIO_ROOT_USER", "minioadmin")
 S3_SECRET_KEY = os.environ.get("MINIO_ROOT_PASSWORD", "minioadmin")
 
