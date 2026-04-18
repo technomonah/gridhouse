@@ -28,7 +28,6 @@ from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.operators.bash import BashOperator
-from airflow.providers.ssh.operators.ssh import SSHOperator
 
 # ---------------------------------------------------------------------------
 # Default task arguments
@@ -89,22 +88,13 @@ with DAG(
     )
 
     # -----------------------------------------------------------------------
-    # Score / Export / Notify — run on host via SSH.
-    # These tasks access the host filesystem (Obsidian vault, .notified_hks)
-    # so they cannot run inside the Airflow container.
-    # SSHOperator connects to host.docker.internal using the mounted SSH key.
+    # Score / Export / Notify — all run inside Airflow container.
+    # Vault is mounted at /opt/vault47, project at /opt/grindhouse.
     # -----------------------------------------------------------------------
-
-    _project = "/Users/nikitamanakov/Desktop/vault47/projects/grindhouse/code"
-    _python = "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3"
-    # SSH sessions on macOS don't load .zshrc — source .env explicitly so
-    # ANTHROPIC_API_KEY and other secrets are available to the scripts.
-    _env = f"set -a && source {_project}/.env && set +a"
 
     score = BashOperator(
         task_id="score",
         # Score vacancies published within the last 30 days that lack a score.
-        # Runs inside Airflow container — Nessie and Claude API both reachable.
         bash_command="cd /opt/grindhouse && python3 -u scripts/score_vacancies.py",
         execution_timeout=timedelta(minutes=30),
     )
@@ -113,29 +103,22 @@ with DAG(
     # Export — write apply/priority_apply vacancies to Obsidian vault
     # -----------------------------------------------------------------------
 
-    export_vacancies = SSHOperator(
+    export_vacancies = BashOperator(
         task_id="export_vacancies",
-        ssh_conn_id="grindhouse_host",
-        # Export vacancies with apply/priority_apply score to hire/vacancy/*.md
-        # Idempotent: skips files that already exist.
-        command=(
-            f"{_env} && cd {_project} && {_python} -u scripts/export_vacancies.py"
-            " --vault-path /Users/nikitamanakov/Desktop/vault47"
-        ),
+        # Export vacancies with apply/priority_apply score to hire/vacancy/*.md.
+        # Vault mounted at /opt/vault47 via docker-compose volume.
+        bash_command="cd /opt/grindhouse && python3 -u scripts/export_vacancies.py --vault-path /opt/vault47",
     )
 
     # -----------------------------------------------------------------------
     # Notify — send Telegram alert for new priority_apply vacancies
     # -----------------------------------------------------------------------
 
-    notify = SSHOperator(
+    notify = BashOperator(
         task_id="notify",
-        ssh_conn_id="grindhouse_host",
         # Alert for vacancies scored as priority_apply in the last ~70 minutes.
-        # Deduplicates via .notified_hks file — safe to run on every hourly tick.
-        command=(
-            f"{_env} && cd {_project} && {_python} -u scripts/notify_vacancies.py"
-        ),
+        # Deduplicates via scripts/.notified_hks (mounted via /opt/grindhouse).
+        bash_command="cd /opt/grindhouse && python3 -u scripts/notify_vacancies.py",
     )
 
     # -----------------------------------------------------------------------

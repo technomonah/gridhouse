@@ -270,10 +270,10 @@ services:
       # Mount project root so BashOperator tasks can call python3 scripts/
       - .:/opt/grindhouse
       - airflow-data:/opt/airflow
+      # Mount Obsidian vault so export_vacancies can write .md files to hire/vacancy/
+      - /Users/nikitamanakov/Desktop/vault47:/opt/vault47
       # Docker socket — required for `docker exec grindhouse-spark` in transform task
       - /var/run/docker.sock:/var/run/docker.sock
-      # SSH private key — used by SSHOperator to connect to host for score/export tasks
-      - ~/.ssh/id_ed25519:/opt/airflow/.ssh/id_ed25519:ro
     command:
       - |
         airflow db migrate &&
