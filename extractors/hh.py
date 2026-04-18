@@ -205,7 +205,7 @@ def _parse_vacancy(item: dict, search_query: str, extracted_at: datetime) -> Raw
     return RawVacancy(
         source="hh",
         source_id=vacancy_id,
-        url=item.get("alternate_url", ""),
+        url=item.get("alternate_url", "").replace("https://hh.ru/", "https://hh.kz/"),
         text=prefilter_text,
         published_at=published_at,
         extracted_at=extracted_at,
@@ -311,7 +311,7 @@ def scrape_search(catalog, search_config: dict, seen_ids: set[str]) -> tuple[int
         seen_ids: Set of vacancy_ids already in the table (mutated in-place).
 
     Returns:
-        Tuple of (total_new_written, passed_prefilter_count).
+        Tuple of (total_new_written, passed_prefilter_count, total_fetched).
     """
     query = search_config["query"]
     area = search_config.get("area", "global")
@@ -332,7 +332,7 @@ def scrape_search(catalog, search_config: dict, seen_ids: set[str]) -> tuple[int
 
     skipped = len(all_vacancies) - len(new_vacancies)
     print(f"  fetched={len(all_vacancies)}, new={len(new_vacancies)}, skipped={skipped}, passed_prefilter={passed}")
-    return len(new_vacancies), passed
+    return len(new_vacancies), passed, len(all_vacancies)
 
 
 def cmd_scrape(searches: list[dict]) -> None:
@@ -354,11 +354,13 @@ def cmd_scrape(searches: list[dict]) -> None:
 
     total_written = 0
     total_passed = 0
+    total_fetched = 0
 
     for i, search_config in enumerate(searches):
-        written, passed = scrape_search(catalog, search_config, seen_ids)
+        written, passed, fetched = scrape_search(catalog, search_config, seen_ids)
         total_written += written
         total_passed += passed
+        total_fetched += fetched
 
         # Pause between queries — randomized to avoid bot fingerprinting.
         if i < len(searches) - 1:
@@ -367,7 +369,10 @@ def cmd_scrape(searches: list[dict]) -> None:
             time.sleep(between_delay)
         print()
 
-    print(f"Done. written={total_written}, passed_prefilter={total_passed}")
+    print(f"Done. fetched={total_fetched}, written={total_written}, passed_prefilter={total_passed}")
+    if total_fetched == 0:
+        print("ERROR: all searches returned 0 vacancies — possible API issue or misconfigured searches")
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
